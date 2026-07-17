@@ -6,35 +6,49 @@ the file tree. Ship defaults that match:
 - Workspace trust dialog OFF by default (sessions are server-provisioned
   workspaces the control plane already vetted; the dialog is the single worst
   first-run experience on any device — see the field history in grotto).
-- The Development Intelligence container is visible and first in the activity bar.
 - Startup editor: none (the agent panel is the home surface, not a Welcome
   tour aimed at hand-coders).
-- Telemetry off by default.
+
+Out of scope for this patch, handled elsewhere: the Development Intelligence
+activity-bar container comes from the baked-in di-ide extension, and telemetry
+is off because the product.json overlay ships no telemetry endpoints (OSS
+builds without them report nothing).
 
 This patch intentionally touches ONLY registered configuration defaults, not
 workbench code paths, so it survives upstream rebases with trivial conflicts.
+Hunks are anchored against the pinned tag in upstream.json (1.96.4); index
+lines are the real 1.96.4 blob hashes so `git apply --3way` can fall back to
+a content merge on small upstream drift. Re-anchor with `build.sh --check`
+after every tag bump.
 
 ---
- src/vs/workbench/services/workspaces/common/workspaceTrust.ts | 2 +-
- src/vs/workbench/browser/workbench.contribution.ts            | 2 +-
+ .../welcomeGettingStarted/browser/gettingStarted.contribution.ts | 2 +-
+ .../contrib/workspace/browser/workspace.contribution.ts          | 2 +-
  2 files changed, 2 insertions(+), 2 deletions(-)
 
-diff --git a/src/vs/workbench/services/workspaces/common/workspaceTrust.ts b/src/vs/workbench/services/workspaces/common/workspaceTrust.ts
---- a/src/vs/workbench/services/workspaces/common/workspaceTrust.ts
-+++ b/src/vs/workbench/services/workspaces/common/workspaceTrust.ts
-@@
--			default: true,
-+			default: false, // Development Intelligence: no trust dialogs — workspaces are provisioned by the control plane
- 			description: localize('workspace.trust.description', "Controls whether or not Workspace Trust is enabled within VS Code."),
-
-diff --git a/src/vs/workbench/browser/workbench.contribution.ts b/src/vs/workbench/browser/workbench.contribution.ts
---- a/src/vs/workbench/browser/workbench.contribution.ts
-+++ b/src/vs/workbench/browser/workbench.contribution.ts
-@@
--				'default': 'welcomePage',
-+				'default': 'none', // Development Intelligence: the agent panel is the home surface
- 				'description': localize('workbench.startupEditor', "Controls which editor is shown at startup, if none are restored from the previous session."),
-
-NOTE: exact context lines must be regenerated against the pinned tag with
-`build.sh --check` — this file documents the intended hunks; the check step
-re-anchors them (they drift by a few lines between releases).
+diff --git a/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.contribution.ts b/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.contribution.ts
+index e5b5899..366f81d 100644
+--- a/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.contribution.ts
++++ b/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.contribution.ts
+@@ -342,7 +342,7 @@ configurationRegistry.registerConfiguration({
+ 				localize({ comment: ['This is the description for a setting. Values surrounded by single quotes are not to be translated.'], key: 'workbench.startupEditor.welcomePageInEmptyWorkbench' }, "Open the Welcome page when opening an empty workbench."),
+ 				localize({ comment: ['This is the description for a setting. Values surrounded by single quotes are not to be translated.'], key: 'workbench.startupEditor.terminal' }, "Open a new terminal in the editor area."),
+ 			],
+-			'default': 'welcomePage',
++			'default': 'none', // Development Intelligence: the agent panel is the home surface, not a Welcome tour
+ 			'description': localize('workbench.startupEditor', "Controls which editor is shown at startup, if none are restored from the previous session.")
+ 		},
+ 		'workbench.welcomePage.preferReducedMotion': {
+diff --git a/src/vs/workbench/contrib/workspace/browser/workspace.contribution.ts b/src/vs/workbench/contrib/workspace/browser/workspace.contribution.ts
+index 0ab6828..85adcd1 100644
+--- a/src/vs/workbench/contrib/workspace/browser/workspace.contribution.ts
++++ b/src/vs/workbench/contrib/workspace/browser/workspace.contribution.ts
+@@ -730,7 +730,7 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration)
+ 		properties: {
+ 			[WORKSPACE_TRUST_ENABLED]: {
+ 				type: 'boolean',
+-				default: true,
++				default: false, // Development Intelligence: no trust dialogs -- workspaces are provisioned by the control plane
+ 				description: localize('workspace.trust.description', "Controls whether or not Workspace Trust is enabled within VS Code."),
+ 				tags: [WORKSPACE_TRUST_SETTING_TAG],
+ 				scope: ConfigurationScope.APPLICATION,

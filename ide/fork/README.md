@@ -28,10 +28,13 @@ fork/
 ├── product.json        # overlay merged onto upstream's product.json
 ├── patches/            # numbered git patches applied on top of the tag
 │   └── 0001-review-first-defaults.patch
-├── build.sh            # clone tag → apply patches → overlay product.json →
-│                       #   bake ../extension as a built-in → run upstream build
-└── ci-build.yml        # GitHub Actions template: desktop (linux/mac/win) + web
+└── build.sh            # clone tag → apply patches → overlay product.json →
+                        #   bake ../extension as a built-in → run upstream build
 ```
+
+CI lives at `.github/workflows/build-di.yml` (repo root): patch check on every
+`ide/**` change (pushes and PRs), web artifact on push/dispatch, desktop
+bundles (linux/mac/win) on release.
 
 ## Building
 
@@ -47,9 +50,9 @@ code-server --install-extension di-ide.vsix
 ./build.sh          # produces vscode/.build/ artifacts
 ```
 
-`ci-build.yml` is a workflow template — copy it to `.github/workflows/` in the
-fork repository (the fork gets its own repo; it does not build inside this
-monorepo).
+The GitHub Actions workflow (`.github/workflows/build-di.yml`) runs the build
+in CI; the clone lands in `ide/fork/.build/` (gitignored), so the fork builds
+from this repo without polluting it.
 
 ## Upgrading upstream
 
