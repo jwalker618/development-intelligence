@@ -1,0 +1,5 @@
+{
+  "repo": "https://github.com/microsoft/vscode",
+  "tag": "1.96.4",
+  "note": "Pin to a stable upstream release tag. Bump deliberately; run build.sh --check after every bump."
+}

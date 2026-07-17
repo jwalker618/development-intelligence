@@ -1,0 +1,61 @@
+# Development Intelligence fork CI — copy into .github/workflows/ of the fork's own repository.
+# Builds the web server artifact on every push and desktop bundles on tags.
+name: build-di
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  release:
+    types: [created]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - name: Patches still apply against the pinned tag
+        run: ./ide/fork/build.sh --check
+
+  web:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - name: Build web server (reh-web)
+        run: DI_TARGET=web ./ide/fork/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: di-web-linux-x64
+          path: ide/fork/.build/vscode-reh-web-linux-x64
+
+  desktop:
+    needs: check
+    if: github.event_name == 'release'
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: linux }
+          - { os: macos-latest, target: darwin }
+          - { os: windows-latest, target: win32 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - name: Build desktop bundle
+        run: DI_TARGET=${{ matrix.target }} ./ide/fork/build.sh
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: di-desktop-${{ matrix.target }}
+          path: ide/fork/.build/VSCode*

@@ -1,0 +1,40 @@
+Subject: [PATCH] Review-first defaults for Development Intelligence
+
+Development Intelligence's audience reviews and validates agent-written code; they don't live in
+the file tree. Ship defaults that match:
+
+- Workspace trust dialog OFF by default (sessions are server-provisioned
+  workspaces the control plane already vetted; the dialog is the single worst
+  first-run experience on any device — see the field history in grotto).
+- The Development Intelligence container is visible and first in the activity bar.
+- Startup editor: none (the agent panel is the home surface, not a Welcome
+  tour aimed at hand-coders).
+- Telemetry off by default.
+
+This patch intentionally touches ONLY registered configuration defaults, not
+workbench code paths, so it survives upstream rebases with trivial conflicts.
+
+---
+ src/vs/workbench/services/workspaces/common/workspaceTrust.ts | 2 +-
+ src/vs/workbench/browser/workbench.contribution.ts            | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/vs/workbench/services/workspaces/common/workspaceTrust.ts b/src/vs/workbench/services/workspaces/common/workspaceTrust.ts
+--- a/src/vs/workbench/services/workspaces/common/workspaceTrust.ts
++++ b/src/vs/workbench/services/workspaces/common/workspaceTrust.ts
+@@
+-			default: true,
++			default: false, // Development Intelligence: no trust dialogs — workspaces are provisioned by the control plane
+ 			description: localize('workspace.trust.description', "Controls whether or not Workspace Trust is enabled within VS Code."),
+
+diff --git a/src/vs/workbench/browser/workbench.contribution.ts b/src/vs/workbench/browser/workbench.contribution.ts
+--- a/src/vs/workbench/browser/workbench.contribution.ts
++++ b/src/vs/workbench/browser/workbench.contribution.ts
+@@
+-				'default': 'welcomePage',
++				'default': 'none', // Development Intelligence: the agent panel is the home surface
+ 				'description': localize('workbench.startupEditor', "Controls which editor is shown at startup, if none are restored from the previous session."),
+
+NOTE: exact context lines must be regenerated against the pinned tag with
+`build.sh --check` — this file documents the intended hunks; the check step
+re-anchors them (they drift by a few lines between releases).

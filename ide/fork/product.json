@@ -1,0 +1,22 @@
+{
+  "nameShort": "Development Intelligence",
+  "nameLong": "Development Intelligence — agent-first review IDE",
+  "applicationName": "development-intelligence",
+  "dataFolderName": ".development-intelligence",
+  "win32MutexName": "devintel",
+  "win32DirName": "Development Intelligence",
+  "win32NameVersion": "Development Intelligence",
+  "win32RegValueName": "Development Intelligence",
+  "win32AppUserModelId": "Development Intelligence.Development Intelligence",
+  "win32ShellNameShort": "Development Intelligence",
+  "darwinBundleIdentifier": "dev.developmentintelligence.ide",
+  "linuxIconName": "development-intelligence",
+  "urlProtocol": "development-intelligence",
+  "quality": "stable",
+  "extensionsGallery": {
+    "serviceUrl": "https://open-vsx.org/vscode/gallery",
+    "itemUrl": "https://open-vsx.org/vscode/item"
+  },
+  "extensionEnabledApiProposals": {},
+  "builtInExtensions": []
+}
