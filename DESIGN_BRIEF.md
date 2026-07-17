@@ -60,18 +60,23 @@ clients are viewports.
   guided Claude connect (paste-code form, never a raw OAuth URL in a
   terminal).
 
-### VS Code IDE (`ide/`) — extension + thin fork
-- **`di-ide` extension** contributes an activity-bar container with two
-  views: **Agent** (chat webview — currently bare-bones HTML/CSS in
-  `ide/extension/media/`) and **Review queue** (tree of changed files across
-  all workspace roots → HEAD↔working diff, revert, mark-reviewed, badge
-  count). Status bar: **caveman dial** (`⛏ CAVEMAN:ULTRA · savings`) →
-  quick-pick. Commands: sign-in, set verbosity, compose multi-repo workspace.
-- **Fork** (`ide/fork/`): patch-based on microsoft/vscode 1.96.4. Ships
-  review-first defaults (workspace trust off, startup editor none) and bakes
-  the extension in as a built-in. Everything else is stock VS Code — the
-  paradigm layer is the extension, which must also run in stock VS Code and
-  code-server.
+### VS Code IDE (`ide/`) — official Claude Code extension + di-ide + thin fork
+- **The agent conversation is the official Claude Code extension**
+  (`anthropic.claude-code`, provisioned from Open VSX at container setup —
+  see `scripts/provision-ide.sh`). It brings native diff approvals, plan
+  mode, checkpoints, session history. **Its interior is Anthropic's UX — DI
+  does not restyle or rebuild it**; DI designs the chrome around it.
+- **`di-ide` extension** is the paradigm layer that pairs with it: **Review
+  queue** (tree of changed files across all workspace roots → HEAD↔working
+  diff, revert, mark-reviewed, "ask agent to tighten" → opens the Claude
+  Code panel with a pre-filled prompt, badge count). Status bar: **caveman
+  dial** (`⛏ CAVEMAN:ULTRA · savings`) → quick-pick. Commands: sign-in, set
+  verbosity, compose multi-repo workspace. It no longer ships a chat webview.
+- **Fork** (`ide/fork/`): patch-based on microsoft/vscode 1.129.0 (≥1.98
+  required by the Claude Code extension). Ships review-first defaults
+  (workspace trust off, startup editor none) and bakes di-ide in as a
+  built-in. Everything else is stock VS Code — di-ide must also run in stock
+  VS Code and code-server.
 
 ---
 
@@ -105,11 +110,14 @@ only. **Free to evolve; keep dark-first and a confident single accent.**
    reading on phone *and* in the IDE, staging/commit flows (roadmap:
    review-queue v2), and how "reviewed" state is communicated. This is the
    pillar the product is named for — spend your best thinking here.
-3. **One design language across both surfaces.** The PWA and the extension
-   webview/chrome currently share nothing visually. Produce a token +
-   component vocabulary that renders in both (plain CSS; the webview also
-   inherits VS Code theme variables — decide how DI tokens and
-   `--vscode-*` variables coexist).
+3. **One design language across both surfaces.** The PWA and the IDE
+   currently share nothing visually. Produce a token + component vocabulary
+   for the PWA and for DI's IDE chrome — the review queue's tree/badging,
+   the caveman dial, the fork's product identity (theme, icon, welcome
+   state). **The agent conversation panel in the IDE is the official Claude
+   Code extension and is out of scope** — do not design a chat surface for
+   the IDE; design how DI's chrome sits beside it (e.g. the review queue ↔
+   agent handoff moment).
 4. **Update `DESIGN.md` itself** — retitle to Development Intelligence,
    fold in the new identity and screens, keep every CONTRACT block and field
    ruling intact (they encode verified behavior). Add IDE-surface sections
@@ -134,6 +142,11 @@ only. **Free to evolve; keep dark-first and a confident single accent.**
 - **Extension portability:** the di-ide extension must look right in the DI
   fork, stock VS Code, and code-server. Don't design anything that needs
   fork-only chrome.
+- **The official Claude Code extension's interior is fixed.** Its panel,
+  diffs, plan documents, and approval prompts are Anthropic's product. DI
+  may choose where it docks and design the moments that lead into it (the
+  review queue's "ask agent to tighten" pre-fills a prompt via its URI
+  handler) — nothing inside it.
 - **Verified flows that must not regress:** guided Claude connect, chat
   approval round-trip, dial → flag → status bar, review queue → diff open,
   MFA login. Redesign their *presentation* freely; their *steps* are proven

@@ -11,4 +11,4 @@ await build({
   sourcemap: false,
   minify: false,
 });
-console.log("cavern extension built → dist/extension.js");
+console.log("di-ide extension built → dist/extension.js");

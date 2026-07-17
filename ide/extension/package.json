@@ -1,7 +1,7 @@
 {
   "name": "di-ide",
   "displayName": "Development Intelligence",
-  "description": "Agent-first review IDE layer: agent chat with native approvals, caveman verbosity dial, review queue, multi-repo workspaces. Talks to the Development Intelligence control plane.",
+  "description": "Agent-first review IDE layer: review queue, caveman verbosity dial, multi-repo workspaces. Pairs with the official Claude Code extension for the agent conversation; talks to the Development Intelligence control plane.",
   "version": "0.1.0",
   "publisher": "jwalker618",
   "license": "MIT",
@@ -33,11 +33,6 @@
     },
     "views": {
       "di": [
-        {
-          "type": "webview",
-          "id": "di.chat",
-          "name": "Agent"
-        },
         {
           "id": "di.review",
           "name": "Review queue"
@@ -75,6 +70,11 @@
         "command": "di.review.done",
         "title": "Mark reviewed",
         "icon": "$(check)"
+      },
+      {
+        "command": "di.review.askAgent",
+        "title": "Ask agent to tighten",
+        "icon": "$(sparkle)"
       }
     ],
     "menus": {
@@ -95,6 +95,11 @@
           "command": "di.review.revert",
           "when": "view == di.review && viewItem == changed",
           "group": "inline@2"
+        },
+        {
+          "command": "di.review.askAgent",
+          "when": "view == di.review && viewItem == changed",
+          "group": "inline@3"
         }
       ]
     },
@@ -119,13 +124,9 @@
     "package": "node esbuild.mjs && vsce package --no-dependencies --allow-missing-repository --skip-license -o di-ide.vsix",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
-    "ws": "^8.18.0"
-  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
-    "@types/ws": "^8.5.13",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.0"

@@ -56,4 +56,10 @@ fi
 # Wire the model-recording statusline wrapper (idempotent, best-effort).
 node scripts/wire-statusline.mjs || true
 
+# IDE server provisioning (official Claude Code extension + di-ide) — only
+# when an IDE build ships in the image (DI_IDE_DIR). Best-effort, marker-based.
+if [ -n "${DI_IDE_DIR:-}" ]; then
+  sh scripts/provision-ide.sh || echo "[di-ide] provisioning best-effort failed"
+fi
+
 exec pnpm start

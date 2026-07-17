@@ -16,8 +16,8 @@ builds without them report nothing).
 
 This patch intentionally touches ONLY registered configuration defaults, not
 workbench code paths, so it survives upstream rebases with trivial conflicts.
-Hunks are anchored against the pinned tag in upstream.json (1.96.4); index
-lines are the real 1.96.4 blob hashes so `git apply --3way` can fall back to
+Hunks are anchored against the pinned tag in upstream.json (1.129.0); index
+lines are the real 1.129.0 blob hashes so `git apply --3way` can fall back to
 a content merge on small upstream drift. Re-anchor with `build.sh --check`
 after every tag bump.
 
@@ -27,23 +27,23 @@ after every tag bump.
  2 files changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.contribution.ts b/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.contribution.ts
-index e5b5899..366f81d 100644
+index 067580a..2a5bd84 100644
 --- a/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.contribution.ts
 +++ b/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.contribution.ts
-@@ -342,7 +342,7 @@ configurationRegistry.registerConfiguration({
- 				localize({ comment: ['This is the description for a setting. Values surrounded by single quotes are not to be translated.'], key: 'workbench.startupEditor.welcomePageInEmptyWorkbench' }, "Open the Welcome page when opening an empty workbench."),
+@@ -327,7 +327,7 @@ configurationRegistry.registerConfiguration({
  				localize({ comment: ['This is the description for a setting. Values surrounded by single quotes are not to be translated.'], key: 'workbench.startupEditor.terminal' }, "Open a new terminal in the editor area."),
+ 				localize({ comment: ['This is the description for a setting. Values surrounded by single quotes are not to be translated.'], key: 'workbench.startupEditor.agentSessionsWelcomePage' }, "Open the Agent Sessions Welcome page. Will override the workbench secondary side bar visibility settings."),
  			],
 -			'default': 'welcomePage',
 +			'default': 'none', // Development Intelligence: the agent panel is the home surface, not a Welcome tour
- 			'description': localize('workbench.startupEditor', "Controls which editor is shown at startup, if none are restored from the previous session.")
- 		},
- 		'workbench.welcomePage.preferReducedMotion': {
+ 			'description': localize('workbench.startupEditor', "Controls which editor is shown at startup, if none are restored from the previous session."),
+ 			'experiment': { mode: 'auto' },
+ 			agentsWindow: { default: 'none', readOnly: true },
 diff --git a/src/vs/workbench/contrib/workspace/browser/workspace.contribution.ts b/src/vs/workbench/contrib/workspace/browser/workspace.contribution.ts
-index 0ab6828..85adcd1 100644
+index 6cccbce..40e1ea8 100644
 --- a/src/vs/workbench/contrib/workspace/browser/workspace.contribution.ts
 +++ b/src/vs/workbench/contrib/workspace/browser/workspace.contribution.ts
-@@ -730,7 +730,7 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration)
+@@ -798,7 +798,7 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration)
  		properties: {
  			[WORKSPACE_TRUST_ENABLED]: {
  				type: 'boolean',

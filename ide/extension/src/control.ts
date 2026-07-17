@@ -1,12 +1,12 @@
 import * as vscode from "vscode";
-import WebSocket from "ws";
 
 /**
  * Client for the Development Intelligence control plane (the Grotto server). The control plane
- * owns sessions (repo checkouts), the headless Claude Code agent (Agent SDK),
- * caveman mode/savings, and Claude subscription auth. The extension is a
- * viewport — the token-economy stack lives server-side, so every surface
- * (this IDE, the phone PWA) inherits it.
+ * owns sessions (repo checkouts), caveman mode/savings, and Claude
+ * subscription auth. The extension is a viewport — the token-economy stack
+ * lives server-side, so every surface (this IDE, the phone PWA) inherits it.
+ * The agent conversation in the IDE is the official Claude Code extension;
+ * the control plane's chat API remains the phone PWA's surface.
  */
 
 export interface SessionInfo {
@@ -103,39 +103,6 @@ export class ControlPlane {
     return this.req("/api/caveman", { method: "POST", body: { mode } });
   }
 
-  chatMessage(sessionId: string, text: string): Promise<unknown> {
-    return this.req(`/api/sessions/${sessionId}/chat/message`, {
-      method: "POST",
-      body: { text },
-    });
-  }
-
-  chatApproval(sessionId: string, id: string, decision: string): Promise<unknown> {
-    return this.req(`/api/sessions/${sessionId}/chat/approval`, {
-      method: "POST",
-      body: { id, decision },
-    });
-  }
-
-  chatInterrupt(sessionId: string): Promise<unknown> {
-    return this.req(`/api/sessions/${sessionId}/chat/interrupt`, { method: "POST" });
-  }
-
-  chatModel(sessionId: string, model: string | null): Promise<unknown> {
-    return this.req(`/api/sessions/${sessionId}/chat/model`, {
-      method: "POST",
-      body: { model },
-    });
-  }
-
-  /** One-way event stream from the session's headless agent. */
-  async chatSocket(sessionId: string): Promise<WebSocket> {
-    const cred = await this.credential();
-    const wsUrl = this.baseUrl.replace(/^http/, "ws");
-    return new WebSocket(
-      `${wsUrl}/api/sessions/${sessionId}/chat?token=${encodeURIComponent(cred)}`,
-    );
-  }
 }
 
 /** Resolve which control-plane session a workspace folder belongs to.
