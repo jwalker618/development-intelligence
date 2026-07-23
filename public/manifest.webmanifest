@@ -1,0 +1,17 @@
+{
+  "name": "Grotto",
+  "short_name": "Grotto",
+  "description": "A cave for vibe-coding — mobile web IDE with caveman + RTK sessions.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#12100e",
+  "theme_color": "#12100e",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

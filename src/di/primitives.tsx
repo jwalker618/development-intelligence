@@ -1,0 +1,48 @@
+import {
+  AlertOctagon, AlertTriangle, ArrowUp, Asterisk, AtSign, BatteryFull, Check, CheckCircle2,
+  ChevronDown, ChevronRight, Circle, CornerUpLeft, Database, DatabaseZap, ExternalLink,
+  FileCode2, FilePen, FilePenLine, FilePlus2, FlaskConical, Folder, FolderGit2, FolderPlus,
+  FolderTree, GitBranch, GitCommitHorizontal, GitCompare, Globe, Loader, Lock, MessagesSquare,
+  Monitor, MonitorSmartphone, Move, Pin, Play, Plus, Radio, RefreshCw, Rocket, RotateCw, ScanEye,
+  Search, ShieldAlert, Signal, Smartphone, SquareArrowOutDownRight, SquareTerminal, Tablet,
+  Terminal, Upload, Wifi, X, type LucideIcon,
+} from "lucide-react";
+import type { CSSProperties, ReactNode } from "react";
+
+/** Kebab-case (design vocabulary) → Lucide component. Only the icons the
+ *  screens use are imported, so they render synchronously and tree-shake. */
+const ICONS: Record<string, LucideIcon> = {
+  "alert-octagon": AlertOctagon, "alert-triangle": AlertTriangle, "arrow-up": ArrowUp,
+  asterisk: Asterisk, "at-sign": AtSign, "battery-full": BatteryFull, check: Check,
+  "check-circle-2": CheckCircle2, "chevron-down": ChevronDown, "chevron-right": ChevronRight,
+  circle: Circle, "corner-up-left": CornerUpLeft, database: Database, "database-zap": DatabaseZap,
+  "external-link": ExternalLink, "file-code-2": FileCode2, "file-pen": FilePen,
+  "file-pen-line": FilePenLine, "file-plus-2": FilePlus2, "flask-conical": FlaskConical,
+  folder: Folder, "folder-git-2": FolderGit2, "folder-plus": FolderPlus, "folder-tree": FolderTree,
+  "git-branch": GitBranch, "git-commit-horizontal": GitCommitHorizontal, "git-compare": GitCompare,
+  globe: Globe, loader: Loader, lock: Lock, "messages-square": MessagesSquare, monitor: Monitor,
+  "monitor-smartphone": MonitorSmartphone, move: Move, pin: Pin, play: Play, plus: Plus,
+  radio: Radio, "refresh-cw": RefreshCw, rocket: Rocket, "rotate-cw": RotateCw, "scan-eye": ScanEye,
+  search: Search, "shield-alert": ShieldAlert, signal: Signal, smartphone: Smartphone,
+  "square-arrow-out-down-right": SquareArrowOutDownRight, "square-terminal": SquareTerminal,
+  tablet: Tablet, terminal: Terminal, upload: Upload, wifi: Wifi, x: X,
+};
+
+/** Lucide icon by kebab-case name (the design references names verbatim). */
+export function Icon({
+  name, size = 14, color = "currentColor", style,
+}: { name: string; size?: number; color?: string; style?: CSSProperties }) {
+  const Cmp = ICONS[name];
+  if (!Cmp) return null;
+  return <Cmp size={size} color={color} style={{ flex: "0 0 auto", ...style }} aria-hidden />;
+}
+
+/** Uppercase tracked eyebrow. `tone` overrides the default ink-mute. */
+export function Eyebrow({ children, tone, style }: { children: ReactNode; tone?: string; style?: CSSProperties }) {
+  return <div className="di-eyebrow" style={{ color: tone, ...style }}>{children}</div>;
+}
+
+/** A rail section title using the theme's rail-title hue. */
+export function RailTitle({ children, style }: { children: ReactNode; style?: CSSProperties }) {
+  return <div className="di-eyebrow" style={{ color: "var(--di-rail-title)", ...style }}>{children}</div>;
+}

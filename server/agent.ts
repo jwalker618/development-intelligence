@@ -1,0 +1,402 @@
+import fs from "node:fs";
+import path from "node:path";
+import {
+  query,
+  type PermissionResult,
+  type PermissionUpdate,
+  type Query,
+  type SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
+import type { WebSocket } from "ws";
+import { sessionEnv, type GrottoConfig } from "./config.js";
+
+// ── Native agent chat ───────────────────────────────────────────────────────
+// The phone never sees Claude Code's full-screen TUI again: the server drives
+// Claude Code HEADLESSLY through the official Agent SDK, and the client gets
+// a structured event stream it renders as a native chat — bubbles, tool
+// cards, real Approve/Deny buttons. Auth is the injected subscription token
+// (no login screens), and caveman + RTK still apply because the SDK loads the
+// same user settings/hooks from CLAUDE_CONFIG_DIR (settingSources below).
+
+export type ChatEventKind =
+  | "init" // claude session started {model}
+  | "user" // user message {text}
+  | "text" // assistant text block {text}
+  | "tool" // tool call {toolUseId, name, summary, input}
+  | "tool_done" // tool result {toolUseId, ok, output}
+  | "approval" // permission ask {id, title, displayName, toolName, input}
+  | "approval_done" // {id, decision}
+  | "result" // turn finished {ok, costUsd, durationMs}
+  | "error"; // {message}
+
+export interface ChatEvent {
+  seq: number;
+  at: number;
+  kind: ChatEventKind;
+  [k: string]: unknown;
+}
+
+interface ChatMeta {
+  claudeSessionId?: string;
+  model?: string;
+}
+
+const HISTORY_LIMIT = 800; // events replayed to a connecting client
+const OUTPUT_CAP = 6000; // chars of tool output persisted per event
+
+function summarize(name: string, input: Record<string, unknown>): string {
+  const s =
+    input.file_path ?? input.path ?? input.command ?? input.pattern ?? input.url ?? input.query;
+  if (typeof s === "string") return s.length > 120 ? s.slice(0, 117) + "…" : s;
+  if (name === "TodoWrite") return "update plan";
+  return "";
+}
+
+function blockText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((b) => (b && typeof b === "object" && "text" in b ? String((b as { text: unknown }).text) : ""))
+      .join("\n");
+  }
+  return "";
+}
+
+/** One headless Claude Code conversation, bound to a session workspace. */
+export class AgentChat {
+  private events: ChatEvent[] = [];
+  private seq = 0;
+  private clients = new Set<WebSocket>();
+  private q: Query | null = null;
+  private inputWaiters: Array<(m: SDKUserMessage) => void> = [];
+  private inputBacklog: SDKUserMessage[] = [];
+  private pending: {
+    id: string;
+    resolve: (r: PermissionResult) => void;
+    input: Record<string, unknown>;
+    toolName: string;
+    suggestions?: PermissionUpdate[];
+  } | null = null;
+  private meta: ChatMeta = {};
+  private busy = false;
+
+  constructor(
+    private cfg: GrottoConfig,
+    readonly sessionId: string,
+    private dir: string,
+  ) {
+    fs.mkdirSync(this.chatDir, { recursive: true });
+    this.load();
+  }
+
+  private get chatDir(): string {
+    return path.join(this.cfg.home, "chat");
+  }
+  private get logPath(): string {
+    return path.join(this.chatDir, `${this.sessionId}.jsonl`);
+  }
+  private get metaPath(): string {
+    return path.join(this.chatDir, `${this.sessionId}.meta.json`);
+  }
+
+  private load(): void {
+    try {
+      const lines = fs.readFileSync(this.logPath, "utf8").split("\n").filter(Boolean);
+      this.events = lines.slice(-HISTORY_LIMIT).map((l) => JSON.parse(l) as ChatEvent);
+      this.seq = this.events.at(-1)?.seq ?? 0;
+    } catch {
+      this.events = [];
+    }
+    try {
+      this.meta = JSON.parse(fs.readFileSync(this.metaPath, "utf8")) as ChatMeta;
+    } catch {
+      this.meta = {};
+    }
+  }
+
+  private saveMeta(): void {
+    try {
+      fs.writeFileSync(this.metaPath, JSON.stringify(this.meta), { mode: 0o600 });
+    } catch {
+      /* chat still works without resume */
+    }
+  }
+
+  /** Persist + broadcast a durable event. */
+  private emit(kind: ChatEventKind, fields: Record<string, unknown>): ChatEvent {
+    const ev: ChatEvent = { seq: ++this.seq, at: Date.now(), kind, ...fields };
+    this.events.push(ev);
+    if (this.events.length > HISTORY_LIMIT) this.events.shift();
+    try {
+      fs.appendFileSync(this.logPath, JSON.stringify(ev) + "\n");
+    } catch {
+      /* history loss only */
+    }
+    this.broadcast({ t: "event", event: ev });
+    return ev;
+  }
+
+  /** Broadcast an ephemeral frame (deltas, status) — not persisted. */
+  private broadcast(frame: Record<string, unknown>): void {
+    const raw = JSON.stringify(frame);
+    for (const ws of this.clients) {
+      if (ws.readyState === ws.OPEN) ws.send(raw);
+    }
+  }
+
+  private setBusy(busy: boolean): void {
+    this.busy = busy;
+    this.broadcast({ t: "status", busy });
+  }
+
+  private lastApprovalEvent(): ChatEvent | null {
+    for (let i = this.events.length - 1; i >= 0; i--) {
+      const e = this.events[i];
+      if (e.kind === "approval" && e.id === this.pending?.id) return e;
+    }
+    return null;
+  }
+
+  attach(ws: WebSocket): void {
+    this.clients.add(ws);
+    ws.send(
+      JSON.stringify({
+        t: "hello",
+        events: this.events,
+        busy: this.busy,
+        model: this.meta.model ?? null,
+        pendingApproval: this.pending ? this.lastApprovalEvent() : null,
+      }),
+    );
+    ws.on("close", () => this.clients.delete(ws));
+  }
+
+  get pendingApprovalTitle(): string | null {
+    if (!this.pending) return null;
+    const ev = this.lastApprovalEvent();
+    return (ev?.title as string) ?? this.pending.toolName;
+  }
+
+  get isBusy(): boolean {
+    return this.busy;
+  }
+
+  get model(): string | null {
+    return this.meta.model ?? null;
+  }
+
+  send(text: string): void {
+    this.emit("user", { text });
+    const msg: SDKUserMessage = {
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text }] },
+      parent_tool_use_id: null,
+    };
+    this.ensureRunning();
+    const waiter = this.inputWaiters.shift();
+    if (waiter) waiter(msg);
+    else this.inputBacklog.push(msg);
+  }
+
+  async setModel(model: string | null): Promise<void> {
+    this.meta.model = model ?? undefined;
+    this.saveMeta();
+    if (this.q) await this.q.setModel(model ?? undefined).catch(() => undefined);
+    this.broadcast({ t: "model", model });
+  }
+
+  async interrupt(): Promise<void> {
+    // An unanswered permission ask holds the turn open — release it first.
+    this.resolveApproval(this.pending?.id ?? "", "deny");
+    if (this.q) await this.q.interrupt().catch(() => undefined);
+    this.setBusy(false);
+  }
+
+  resolveApproval(id: string, decision: "allow" | "always" | "deny"): boolean {
+    const p = this.pending;
+    if (!p || p.id !== id) return false;
+    this.pending = null;
+    this.emit("approval_done", { id, decision });
+    if (decision === "deny") {
+      p.resolve({ behavior: "deny", message: "Denied from Grotto." });
+    } else {
+      p.resolve({
+        behavior: "allow",
+        updatedInput: p.input,
+        ...(decision === "always" && p.suggestions?.length
+          ? { updatedPermissions: p.suggestions }
+          : {}),
+      });
+    }
+    this.broadcast({ t: "approval_cleared", id });
+    return true;
+  }
+
+  destroy(): void {
+    void this.interrupt();
+    for (const ws of this.clients) ws.close();
+    this.clients.clear();
+    fs.rmSync(this.logPath, { force: true });
+    fs.rmSync(this.metaPath, { force: true });
+  }
+
+  // ── SDK loop ──────────────────────────────────────────────────────────────
+
+  private nextInput(): Promise<SDKUserMessage> {
+    const queued = this.inputBacklog.shift();
+    if (queued) return Promise.resolve(queued);
+    return new Promise((resolve) => this.inputWaiters.push(resolve));
+  }
+
+  private ensureRunning(): void {
+    if (this.q) return;
+
+    const self = this;
+    async function* inputs(): AsyncIterable<SDKUserMessage> {
+      for (;;) yield await self.nextInput();
+    }
+
+    const env: Record<string, string | undefined> = { ...sessionEnv(this.cfg) };
+
+    const q = query({
+      prompt: inputs(),
+      options: {
+        cwd: this.dir,
+        env,
+        resume: this.meta.claudeSessionId,
+        model: this.meta.model,
+        // Load the user's CLAUDE_CONFIG_DIR settings + the repo's CLAUDE.md —
+        // this is what keeps caveman hooks and RTK in the loop headlessly.
+        settingSources: ["user", "project"],
+        includePartialMessages: true,
+        permissionMode: "default",
+        canUseTool: async (toolName, input, opts) => {
+          // One ask at a time (matches Claude Code's own serial prompts).
+          const result = new Promise<PermissionResult>((resolve) => {
+            this.pending = {
+              id: opts.requestId,
+              resolve,
+              input,
+              toolName,
+              suggestions: opts.suggestions,
+            };
+          });
+          this.emit("approval", {
+            id: opts.requestId,
+            toolName,
+            title: opts.title ?? `Claude wants to use ${toolName}`,
+            displayName: opts.displayName ?? toolName,
+            input,
+          });
+          opts.signal.addEventListener("abort", () => {
+            if (this.pending?.id === opts.requestId) {
+              this.pending = null;
+              this.broadcast({ t: "approval_cleared", id: opts.requestId });
+            }
+          });
+          return result;
+        },
+      },
+    });
+    this.q = q;
+
+    void (async () => {
+      try {
+        for await (const msg of q) {
+          switch (msg.type) {
+            case "system":
+              if (msg.subtype === "init") {
+                this.meta.claudeSessionId = msg.session_id;
+                if (!this.meta.model) this.meta.model = msg.model;
+                this.saveMeta();
+                this.emit("init", { model: msg.model });
+                this.setBusy(true);
+              }
+              break;
+            case "stream_event": {
+              const ev = msg.event as {
+                type: string;
+                delta?: { type?: string; text?: string };
+              };
+              if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta") {
+                this.broadcast({ t: "delta", text: ev.delta.text ?? "" });
+              }
+              break;
+            }
+            case "assistant": {
+              this.setBusy(true);
+              for (const block of msg.message.content) {
+                if (block.type === "text" && block.text.trim()) {
+                  this.emit("text", { text: block.text });
+                } else if (block.type === "tool_use") {
+                  this.emit("tool", {
+                    toolUseId: block.id,
+                    name: block.name,
+                    summary: summarize(block.name, block.input as Record<string, unknown>),
+                    input: JSON.stringify(block.input).slice(0, OUTPUT_CAP),
+                  });
+                }
+              }
+              break;
+            }
+            case "user": {
+              const content = msg.message.content;
+              if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (block.type === "tool_result") {
+                    this.emit("tool_done", {
+                      toolUseId: block.tool_use_id,
+                      ok: !block.is_error,
+                      output: blockText(block.content).slice(0, OUTPUT_CAP),
+                    });
+                  }
+                }
+              }
+              break;
+            }
+            case "result":
+              this.emit("result", {
+                ok: msg.subtype === "success",
+                costUsd: "total_cost_usd" in msg ? msg.total_cost_usd : null,
+                durationMs: msg.duration_ms,
+              });
+              this.setBusy(false);
+              break;
+            default:
+              break;
+          }
+        }
+      } catch (e) {
+        this.emit("error", { message: e instanceof Error ? e.message : String(e) });
+      } finally {
+        if (this.q === q) this.q = null;
+        this.setBusy(false);
+      }
+    })();
+  }
+}
+
+/** Chats keyed by Grotto session id, created lazily, destroyed with the session. */
+export class AgentChats {
+  private chats = new Map<string, AgentChat>();
+
+  constructor(private cfg: GrottoConfig) {}
+
+  get(sessionId: string, dir: string): AgentChat {
+    let chat = this.chats.get(sessionId);
+    if (!chat) {
+      chat = new AgentChat(this.cfg, sessionId, dir);
+      this.chats.set(sessionId, chat);
+    }
+    return chat;
+  }
+
+  peek(sessionId: string): AgentChat | null {
+    return this.chats.get(sessionId) ?? null;
+  }
+
+  destroy(sessionId: string): void {
+    this.chats.get(sessionId)?.destroy();
+    this.chats.delete(sessionId);
+  }
+}

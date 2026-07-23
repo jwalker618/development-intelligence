@@ -1,0 +1,5 @@
+{
+  "repo": "https://github.com/microsoft/vscode",
+  "tag": "1.129.0",
+  "note": "Pin to a stable upstream release tag (>=1.98.0 required by the official Claude Code extension). Bump deliberately; run build.sh --check after every bump."
+}

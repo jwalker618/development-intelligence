@@ -1,0 +1,134 @@
+{
+  "name": "di-ide",
+  "displayName": "Development Intelligence",
+  "description": "Agent-first review IDE layer: review queue, caveman verbosity dial, multi-repo workspaces. Pairs with the official Claude Code extension for the agent conversation; talks to the Development Intelligence control plane.",
+  "version": "0.1.0",
+  "publisher": "jwalker618",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jwalker618/development-intelligence"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "di",
+          "title": "Development Intelligence",
+          "icon": "media/di.svg"
+        }
+      ]
+    },
+    "views": {
+      "di": [
+        {
+          "id": "di.review",
+          "name": "Review queue"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "di.signIn",
+        "title": "DI: Sign in to control plane"
+      },
+      {
+        "command": "di.setMode",
+        "title": "DI: Set caveman verbosity"
+      },
+      {
+        "command": "di.composeWorkspace",
+        "title": "DI: Open sessions as multi-repo workspace"
+      },
+      {
+        "command": "di.review.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "di.review.openDiff",
+        "title": "Open diff"
+      },
+      {
+        "command": "di.review.revert",
+        "title": "Revert file",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "di.review.done",
+        "title": "Mark reviewed",
+        "icon": "$(check)"
+      },
+      {
+        "command": "di.review.askAgent",
+        "title": "Ask agent to tighten",
+        "icon": "$(sparkle)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "di.review.refresh",
+          "when": "view == di.review",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "di.review.done",
+          "when": "view == di.review && viewItem == changed",
+          "group": "inline@1"
+        },
+        {
+          "command": "di.review.revert",
+          "when": "view == di.review && viewItem == changed",
+          "group": "inline@2"
+        },
+        {
+          "command": "di.review.askAgent",
+          "when": "view == di.review && viewItem == changed",
+          "group": "inline@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Development Intelligence",
+      "properties": {
+        "di.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:4870",
+          "description": "Development Intelligence control plane URL (sessions, agent, caveman, auth)."
+        },
+        "di.sessionId": {
+          "type": "string",
+          "default": "",
+          "description": "Control-plane session id bound to this workspace. Auto-detected from the workspace path when empty."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "package": "node esbuild.mjs && vsce package --no-dependencies --allow-missing-repository --skip-license -o di-ide.vsix",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}
