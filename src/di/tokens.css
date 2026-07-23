@@ -1,0 +1,127 @@
+/* ============================================================================
+ * Development Intelligence — design tokens (dark-first, Generate-family)
+ *
+ * DI is a member of the Generate platform family. It inherits Generate's token
+ * CONTRACT (variable names), IBM Plex type, tabular numerals, the eyebrow
+ * signature, hairline elevation and radii — expressed in Generate's dark
+ * "deep-ocean" palette with a warm coral/orange spot that unifies the caveman
+ * orange with Generate's coral. Values below are the source of truth for the
+ * mockups in "Development Intelligence.dc.html".
+ *
+ * In the PWA these are plain CSS variables. In the di-ide webview, map DI
+ * tokens onto --vscode-* where a native equivalent exists (so the panel still
+ * respects the user's VS Code theme); use DI values for DI-only chrome.
+ * ========================================================================= */
+
+:root {
+  /* Surface — deep ocean navy */
+  --di-canvas:        #07182a;   /* app background */
+  --di-surface:       #14304b;   /* cards / bars */
+  --di-surface-sunken:#0e2640;   /* wells, inputs, tracks */
+  --di-surface-elev:  #1a3d5f;   /* raised / header strips / active pill */
+  --di-panel-alt:     #0a2036;   /* secondary panel fill (rails, queues) */
+
+  /* Ink — warm cream on navy */
+  --di-ink:      #f1ece0;
+  --di-ink-soft: #cdd8e5;
+  --di-ink-mute: #98a6b8;
+  --di-ink-faint:#6f8296;
+
+  /* Rules */
+  --di-rule:        #2b4f75;
+  --di-rule-strong: #3e6794;
+  --di-rule-inner:  #16334f;
+
+  /* Chrome (stays navy in both themes — structure, not content) */
+  --di-chrome:      #0b2237;
+  --di-chrome-deep: #051322;
+
+  /* Accents — tone vocabulary (each has a -soft companion) */
+  --di-info:      #39d3ba;  --di-info-soft: #173e48;  --di-info-deep:#b8f2e5; /* agent-produced / savings / "native" */
+  --di-spot:      #f0926e;  --di-spot-soft: #241a0e;  --di-spot-deep:#fbd0ba; /* your action / CTA / awaiting-you */
+  --di-pos:       #6eee7a;  --di-pos-soft:  #173821;  /* keep / additions / reviewed */
+  --di-neg:       #ff8585;  --di-neg-soft:  #3a1414;  /* revert / deletions */
+  --di-warn:      #f8bd5e;  --di-warn-soft: #3b2911;  /* needs-you / conflict / MOVED code */
+  --di-aux:       #9ab1f2;  --di-aux-soft:  #1c2a4f;
+
+  /* caveman feature brand (the ⛏ pickaxe glyph only; slightly hotter orange) */
+  --di-caveman:      #f97316;
+  --di-caveman-fill: #1c1206;   /* dial card fill */
+  --di-caveman-edge: #5c3a1a;   /* dial card border */
+
+  /* "Claude Code panel" — NEUTRAL greys (Anthropic's surface; DI never restyles
+     its interior — these are only for the placeholder/container chrome) */
+  --cc-bg:     #0c1219;
+  --cc-skel:   #141d27;
+  --cc-rule:   #22303d;
+  --cc-ink:    #e7ecf1;
+  --cc-ink-mute:#6f7d8c;
+
+  /* Type */
+  --di-font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --di-font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --di-eyebrow-track: 0.12em;   /* uppercase 10.5px eyebrow, weight 600, ink-mute */
+
+  /* Shape */
+  --di-radius-card: 14px;
+  --di-radius-btn:  10px;
+  --di-radius-tile: 12px;   /* nav / icon tiles */
+  --di-radius-chip: 999px;
+
+  /* Motion — short, soft, no bounce */
+  --di-dur-fast: 160ms;
+  --di-ease:     cubic-bezier(0.2,0.7,0.2,1);
+
+  /* ---- Rail theme (default = Indigo); overridden by [data-di-theme] below ---- */
+  --di-rail-bg:      linear-gradient(180deg,#171f34,#111725);
+  --di-rail-border:  #2c3a5e;
+  --di-rail-accent:  linear-gradient(90deg,#4a60a8,#39d3ba); /* 3px top bar */
+  --di-rail-hue:     #7f92d8;   /* awaiting-active + "Tighten" accent */
+  --di-rail-title:   #9db0e0;   /* title eyebrow */
+  --di-rail-chip-bg: #182036;   --di-rail-chip-border: #34477a;
+  --di-rail-row-bg:  #1c2540;   --di-rail-row-border:  #34477a;
+  --di-rail-dock-bg: #121728;
+
+  /* Constant across themes (never re-themed) */
+  --di-nav-bg:   var(--di-spot);   /* flush nav button */
+  --di-nav-ink:  #3a140a;
+  --di-cta:      var(--di-spot);   /* Commit & sync / Review & run / Send to agent */
+
+  /* Task runner */
+  --di-secret-chip-bg:     var(--di-surface-sunken);
+  --di-secret-chip-border: var(--di-rule-strong);  /* dashed */
+  --di-destructive:        var(--di-neg);
+  --di-destructive-soft:   #2a1414;   --di-destructive-border: #5a2626;
+}
+
+
+/* ============================================================================
+ * Rail themes — five user-selectable identities. Only rail + review accents;
+ * nav (coral), CTA (coral) and semantic keep/revert (green/red) stay constant.
+ * See THEMES.md for the full application rules.
+ * ========================================================================= */
+[data-di-theme="indigo"] {
+  --di-rail-bg: linear-gradient(180deg,#171f34,#111725); --di-rail-border:#2c3a5e;
+  --di-rail-accent: linear-gradient(90deg,#4a60a8,#39d3ba); --di-rail-hue:#7f92d8; --di-rail-title:#9db0e0;
+  --di-rail-chip-bg:#182036; --di-rail-chip-border:#34477a; --di-rail-row-bg:#1c2540; --di-rail-row-border:#34477a; --di-rail-dock-bg:#121728;
+}
+[data-di-theme="teal"] {
+  --di-rail-bg: linear-gradient(180deg,#0d2226,#0a1922); --di-rail-border:#1d4048;
+  --di-rail-accent: linear-gradient(90deg,#0e7c8c,#39d3ba); --di-rail-hue:#39d3ba; --di-rail-title:#5fe0cc;
+  --di-rail-chip-bg:#0e2426; --di-rail-chip-border:#1f4a4a; --di-rail-row-bg:#0f2a2c; --di-rail-row-border:#1f4a4a; --di-rail-dock-bg:#0b1e20;
+}
+[data-di-theme="ember"] {
+  --di-rail-bg: linear-gradient(180deg,#1f130c,#140f0e); --di-rail-border:#3a2418;
+  --di-rail-accent: linear-gradient(90deg,#f0926e,#f8bd5e); --di-rail-hue:#f8bd5e; --di-rail-title:#e6b078;
+  --di-rail-chip-bg:#1c130a; --di-rail-chip-border:#4a3016; --di-rail-row-bg:#241608; --di-rail-row-border:#4a3016; --di-rail-dock-bg:#150f0a;
+}
+[data-di-theme="plum"] {
+  --di-rail-bg: linear-gradient(180deg,#1e1630,#150f22); --di-rail-border:#3a2c58;
+  --di-rail-accent: linear-gradient(90deg,#8a5cc4,#39d3ba); --di-rail-hue:#b98fe0; --di-rail-title:#b98fe0;
+  --di-rail-chip-bg:#1e162e; --di-rail-chip-border:#473466; --di-rail-row-bg:#241a3a; --di-rail-row-border:#473466; --di-rail-dock-bg:#171029;
+}
+[data-di-theme="graphite"] {
+  --di-rail-bg: linear-gradient(180deg,#161c22,#10151b); --di-rail-border:#2a3540;
+  --di-rail-accent: linear-gradient(90deg,#5a6b7c,#f0926e); --di-rail-hue:#f0926e; --di-rail-title:#93a4b5;
+  --di-rail-chip-bg:#161d24; --di-rail-chip-border:#313d49; --di-rail-row-bg:#1a222b; --di-rail-row-border:#313d49; --di-rail-dock-bg:#12181e;
+}
