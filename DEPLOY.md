@@ -6,6 +6,20 @@ both the web app and the vibe-coding environment (git, Claude Code, Gemini
 CLI, caveman + RTK baked in). Sessions are workspaces inside it; your phone is
 a viewport.
 
+> **Deploying for a review of the new turn-35 desktop UI?** See
+> [`docs/REVIEW_DEPLOY.md`](docs/REVIEW_DEPLOY.md) — a review-tuned quickstart
+> (deploy from the feature branch, create the first session via API, hand a
+> reviewer access). **Vercel is not used** and can't host this stateful
+> WS/PTY/volume server — that guide explains why.
+>
+> **UI note:** the deployed front-end is now the **turn-35 desktop app** — the
+> first screen is the DI **Login** gate (paste `GROTTO_TOKEN` → device
+> credential), not the old "Enter the cave" PWA. Sections below that reference
+> the FAB / chips / Agent-tab / Term-tab describe the earlier PWA; the deploy
+> mechanics (build, volume, env, auth, Claude connect) are unchanged and
+> correct — only the on-screen chrome differs. Creating a session currently
+> needs one API call (REVIEW_DEPLOY §5a); a create-session button is next-phase.
+
 ## What you need before starting
 
 | Secret | How to get it |
