@@ -26,7 +26,10 @@ RUN apt-get update \
     git curl ca-certificates python3 make g++ util-linux ripgrep jq \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g pnpm @anthropic-ai/claude-code
+# Pin pnpm — unpinned "latest" drifted into a version that treats un-approved
+# dependency build scripts (node-pty, esbuild) as a fatal install error. The
+# build scripts are approved via pnpm.onlyBuiltDependencies in package.json.
+RUN npm install -g pnpm@10.33.0 @anthropic-ai/claude-code
 
 # Gemini CLI for multi-model routing from the same PTY (best-effort — grotto
 # works without it). Installed before caveman so its installer detects it.
