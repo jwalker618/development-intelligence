@@ -1,62 +1,87 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import "./tokens.css";
 import "./di.css";
+import { getToken } from "../api";
 import { Frame } from "./Shell";
+import { Login } from "./Login";
+import { useControl } from "./useControl";
 import { SessionScreen } from "./screens/Session";
 import { ChangesScreen } from "./screens/Changes";
 import { FilesScreen } from "./screens/Files";
 import { PreviewScreen } from "./screens/Preview";
 import { TasksScreen } from "./screens/Tasks";
-import { seedState, type CavemanMode, type SessionState, type Theme, type Verdict, type View } from "./state";
+import { Icon } from "./primitives";
+import { type Theme, type View } from "./state";
 
 const THEME_KEY = "di.theme";
 const VIEW_KEY = "di.view";
 
 export default function DIApp() {
-  const [view, setView] = useState<View>(() => (localStorage.getItem(VIEW_KEY) as View) || "session");
-  const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem(THEME_KEY) as Theme) || "indigo");
-  const [s, setS] = useState<SessionState>(seedState);
+  const [authed, setAuthed] = useState(() => !!getToken());
+  if (!authed) return <Login onDone={() => setAuthed(true)} />;
+  return <Workbench onReauth={() => setAuthed(false)} />;
+}
 
-  // The rail colour is a per-user theme: drive [data-di-theme] on <html>.
-  useEffect(() => {
-    document.documentElement.setAttribute("data-di-theme", theme);
-    localStorage.setItem(THEME_KEY, theme);
-  }, [theme]);
-  useEffect(() => { localStorage.setItem(VIEW_KEY, view); }, [view]);
+function Workbench({ onReauth }: { onReauth: () => void }) {
+  const [view, setView] = useState<View>(() => (localStorage.getItem(VIEW_KEY) as View) || "changes");
+  const [theme, setThemeState] = useState<Theme>(() => (localStorage.getItem(THEME_KEY) as Theme) || "indigo");
+  const live = useControl();
 
-  const setCaveman = (mode: CavemanMode) =>
-    setS((p) => ({ ...p, caveman: { ...p.caveman, mode } }));
-  const unpin = (id: string) =>
-    setS((p) => ({ ...p, pins: p.pins.filter((x) => x.id !== id) }));
-  const setVerdict = (path: string, hunk: number, v: Verdict) =>
-    setS((p) => ({
-      ...p,
-      changes: p.changes.map((c) =>
-        c.path === path && c.hunks
-          ? { ...c, hunks: c.hunks.map((h, i) => (i === hunk ? { ...h, verdict: h.verdict === v ? null : v } : h)) }
-          : c,
-      ),
-    }));
-  const setViewport = (vp: "phone" | "tablet" | "desktop") =>
-    setS((p) => ({ ...p, preview: { ...p.preview, viewport: vp } }));
-  const sendToAgent = () => setView("session");
+  const setTheme = (t: Theme) => { setThemeState(t); localStorage.setItem(THEME_KEY, t); document.documentElement.setAttribute("data-di-theme", t); };
+  const changeView = (v: View) => { setView(v); localStorage.setItem(VIEW_KEY, v); };
+  // ensure the attribute is set on first paint
+  document.documentElement.setAttribute("data-di-theme", theme);
+
+  if (live.conn === "reauth") { onReauth(); return null; }
+
+  const { state, chat, tree, activeDiff, cavemanSavings, sample, conn, error, actions } = live;
 
   return (
     <div className="di-app">
       <Frame
-        view={view} onView={setView}
+        view={view} onView={changeView}
         theme={theme} onTheme={setTheme}
-        repoCount={s.repoCount}
+        repoCount={state.repoCount}
         screen={
           <>
-            {view === "session" && <SessionScreen s={s} onCaveman={setCaveman} onUnpin={unpin} />}
-            {view === "changes" && <ChangesScreen s={s} onVerdict={setVerdict} />}
-            {view === "files" && <FilesScreen />}
-            {view === "preview" && <PreviewScreen s={s} onViewport={setViewport} onSendToAgent={sendToAgent} />}
-            {view === "tasks" && <TasksScreen s={s} />}
+            {view === "session" && (
+              <SessionScreen s={state} chat={chat} cavemanSavings={cavemanSavings} sample={sample}
+                onCaveman={actions.setCaveman} onSend={actions.sendMessage}
+                onApproval={actions.resolveApproval} onInterrupt={actions.interrupt} />
+            )}
+            {view === "changes" && (
+              <ChangesScreen s={state} activeDiff={activeDiff} sample={sample}
+                onSelect={actions.selectChange} onVerdict={actions.setVerdict}
+                onReviewed={actions.markReviewed} onCommitSync={actions.commitSync} />
+            )}
+            {view === "files" && <FilesScreen tree={tree} onOpen={() => undefined} />}
+            {view === "preview" && <PreviewScreen s={state} sample={sample} onViewport={() => undefined} onSendToAgent={() => changeView("session")} />}
+            {view === "tasks" && <TasksScreen s={state} sample={sample} />}
           </>
         }
       />
+      <ConnBanner conn={conn} error={error} onRetry={actions.refresh} />
     </div>
+  );
+}
+
+/** Non-blocking connection state — the app stays usable; the banner tells the
+ *  truth about liveness (design invariant: every surface reads "still alive"). */
+function ConnBanner({ conn, error, onRetry }: { conn: string; error: string | null; onRetry: () => void }) {
+  if (conn === "live") return null;
+  const msg: Record<string, { text: string; tone: string; icon: string }> = {
+    loading: { text: "Connecting to the control plane…", tone: "var(--di-info)", icon: "loader" },
+    connecting: { text: "Connecting…", tone: "var(--di-info)", icon: "loader" },
+    offline: { text: "Reconnecting — session still alive", tone: "var(--di-warn)", icon: "refresh-cw" },
+    nosession: { text: "No active session on the control plane yet", tone: "var(--di-ink-mute)", icon: "circle" },
+    error: { text: error || "Control-plane error", tone: "var(--di-neg)", icon: "alert-triangle" },
+  };
+  const m = msg[conn] ?? msg.error;
+  return (
+    <button className="di-btn" onClick={onRetry} style={{ position: "fixed", bottom: 16, right: 16, zIndex: 40,
+      display: "inline-flex", alignItems: "center", gap: 8, height: 30, padding: "0 13px", borderRadius: 999,
+      background: "var(--di-surface)", border: `1px solid ${m.tone}`, color: m.tone, fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
+      <Icon name={m.icon} size={13} />{m.text}
+    </button>
   );
 }

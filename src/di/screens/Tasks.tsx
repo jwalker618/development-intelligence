@@ -1,9 +1,11 @@
 import { useMemo, useState } from "react";
 import { Icon, RailTitle } from "../primitives";
 import { RailDock, MainColumn } from "../Shell";
+import { SampleChip } from "./Session";
+import type { SAMPLE } from "../control";
 import type { SessionState, TaskManifest, TaskParam } from "../state";
 
-export function TasksScreen({ s }: { s: SessionState }) {
+export function TasksScreen({ s, sample }: { s: SessionState; sample: typeof SAMPLE }) {
   const [selectedId, setSelectedId] = useState(s.tasks[0].id);
   const task = s.tasks.find((t) => t.id === selectedId)!;
   const groups = useMemo(() => {
@@ -15,7 +17,7 @@ export function TasksScreen({ s }: { s: SessionState }) {
   return (
     <>
       {/* ── rail: task palette ── */}
-      <RailTitle style={{ position: "absolute", top: 52, left: 0, width: 340, boxSizing: "border-box", padding: "0 14px", zIndex: 5 }}>Tasks</RailTitle>
+      <RailTitle style={{ position: "absolute", top: 52, left: 0, width: 340, boxSizing: "border-box", padding: "0 14px", zIndex: 5, display: "flex", alignItems: "center", gap: 6 }}>Tasks {sample.tasks && <SampleChip />}</RailTitle>
       <div style={{ position: "absolute", top: 78, left: 0, width: 340, boxSizing: "border-box", padding: "0 14px", zIndex: 5 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, height: 34, padding: "0 11px", border: "1px solid var(--di-rail-row-border)", borderRadius: 9, background: "var(--di-rail-row-bg)" }}>
           <Icon name="search" size={14} color="var(--di-rail-hue)" />

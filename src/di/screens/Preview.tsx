@@ -1,5 +1,8 @@
+import { useState } from "react";
 import { Icon, RailTitle } from "../primitives";
 import { RailDock, MainColumn } from "../Shell";
+import { SampleChip } from "./Session";
+import type { SAMPLE } from "../control";
 import type { SessionState } from "../state";
 
 type Viewport = "phone" | "tablet" | "desktop";
@@ -10,19 +13,22 @@ const VP: { id: Viewport; icon: string; label: string; w: number; h: number; dev
 ];
 
 export function PreviewScreen({
-  s, onViewport, onSendToAgent,
+  s, sample, onViewport, onSendToAgent,
 }: {
   s: SessionState;
+  sample: typeof SAMPLE;
   onViewport: (v: Viewport) => void;
   onSendToAgent: () => void;
 }) {
-  const vp = s.preview.viewport;
+  const [vpLocal, setVpLocal] = useState<Viewport>(s.preview.viewport);
+  const vp = vpLocal;
+  const setVp = (v: Viewport) => { setVpLocal(v); onViewport(v); };
   const frame = VP.find((v) => v.id === vp)!;
   return (
     <>
       {/* ── rail ── */}
       <div style={{ position: "absolute", top: 52, left: 0, width: 340, boxSizing: "border-box", padding: "0 14px", zIndex: 5 }}>
-        <RailTitle style={{ padding: "2px 2px 11px" }}>Preview</RailTitle>
+        <RailTitle style={{ padding: "2px 2px 11px", display: "flex", alignItems: "center", gap: 6 }}>Preview {sample.preview && <SampleChip />}</RailTitle>
         <div style={{ display: "flex", alignItems: "center", gap: 8, height: 34, padding: "0 11px", border: "1px solid var(--di-rail-row-border)",
           borderRadius: 9, background: "var(--di-rail-row-bg)", marginBottom: 8 }}>
           <Icon name="globe" size={13} color="var(--di-rail-hue)" />
@@ -35,7 +41,7 @@ export function PreviewScreen({
           {VP.map((v) => {
             const active = v.id === vp;
             return (
-              <button key={v.id} className="di-btn" onClick={() => onViewport(v.id)} aria-pressed={active}
+              <button key={v.id} className="di-btn" onClick={() => setVp(v.id)} aria-pressed={active}
                 style={{ flex: 1, height: 30, border: 0, borderRadius: 7, background: active ? "var(--di-spot)" : "transparent",
                   color: active ? "#3a140a" : "var(--di-rail-title)", fontFamily: "inherit", fontSize: 11, fontWeight: 600, cursor: "pointer",
                   display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 5 }}>

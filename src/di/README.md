@@ -20,17 +20,33 @@ reference — recreated here in React, not copied.
   review hero — semantic diff + per-hunk verdicts), `Files` (35c),
   `Preview` (35d), `Tasks` (35e, task runner + typed-challenge confirm gate).
 
-## What's real vs. mocked
-Fully built and interactive: shell + view switching, all five rail themes,
-caveman verbosity dial, per-hunk Keep/Revert/Tighten, Files pin toggle, Preview
-viewport switch + runtime→agent, Tasks param form + destructive confirm gate
-(typed challenge, masked secrets, plain-prose warning).
+## Control-plane wiring (live)
+`control.ts` maps the server shapes → the DI view-model and holds the actions
+(over `src/api.ts`, the existing client). `useControl.ts` bootstraps a session,
+loads the live slices, subscribes to the chat WS (reconnecting), mirrors the
+caveman flag on a ~15s poll, and surfaces a 401 as re-auth. `Login.tsx` is the
+token+MFA gate and the 401 recovery surface.
 
-**Not yet wired (next phase):** the live control plane. The screens read from
-`seedState`; connect them to the server (`server/`) sessions/changes/caveman/
-tasks endpoints and the WS event stream. The official Claude Code panel in the
-Session screen is a placeholder for where `anthropic.claude-code` docks in the
-IDE surface; on the PWA it will be the control-plane chat.
+**Live against the control plane:**
+- **Session** — caveman dial writes `POST /api/caveman`; the Claude Code panel
+  renders the folded chat WS event stream (user/agent/tool/approval), with an
+  interactive Allow/Always/Deny card and a working composer
+  (`chat/{message,approval,interrupt}`); timeline from `git/log`; model +
+  busy/interrupt from the WS; the Caveman KPI shows the real savings suffix.
+- **Changes** — the list is `git/status`; clicking a change loads the real
+  `git/diff` (parsed into hunks); Commit & sync runs `POST …/git {op:"sync"}`.
+- **Files** — the tree is `…/tree`.
+
+**Still on sample data (no backend yet — see design §9; flagged in-UI with a
+`SAMPLE` chip and centralised in `control.ts` `SAMPLE`):** RTK gain %, the
+caveman *percent* (server gives a lifetime savings string, not a per-session
+%), the **semantic span-diff** engine (line diff only until the
+`document-intelligence` engine is wired — labelled "span engine not wired"),
+**pins**, the **task runner**, and the **preview runtime bridge**. The Files
+inline file view and per-hunk Revert-to-git are also next-phase.
+
+The official Claude Code panel styling in Session is where `anthropic.claude-code`
+docks in the IDE surface; on the PWA it is the control-plane chat (now live).
 
 **Phone-responsive:** the shell is drawn at the reference's desktop proportions
 (340px rail + main). A phone breakpoint that collapses the rail into a drawer
