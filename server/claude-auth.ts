@@ -30,8 +30,32 @@ export interface AuthStatus {
 const ANSI_RE =
   /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|[\x00-\x08\x0b-\x1f\x7f]/g;
 const TOKEN_RE = /sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,}/;
-const URL_RE = /https:\/\/[^\s"'<>]+/;
+const URL_RE = /https:\/\/[^\s"'<>]+/g;
+// OSC-8 hyperlink: ESC ] 8 ; <params> ; <URL> (ST = BEL or ESC \). The URL here
+// is the true, un-wrapped target — the CLI often renders an elided display text
+// over it, so we must read the URL out of the escape, not the visible text.
+const OSC8_RE = /\x1b\]8;[^;]*;(https:\/\/[^\x07\x1b]+)(?:\x07|\x1b\\)/g;
 const FLOW_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Pull the authorize URL out of the CLI output robustly. Prefers the OSC-8
+ * hyperlink target (immune to line-wrapping and display-text elision), then
+ * falls back to plain-text matches. Among candidates, prefers a claude.ai OAuth
+ * URL and the longest match (query params intact).
+ */
+function extractAuthUrl(raw: string): string | null {
+  const cands: string[] = [];
+  for (const m of raw.matchAll(OSC8_RE)) cands.push(m[1]);
+  const plain = raw.replace(ANSI_RE, "");
+  for (const m of plain.matchAll(URL_RE)) cands.push(m[0]);
+  if (!cands.length) return null;
+  const clean = (u: string) => u.replace(/[),.;:!?'"\s]+$/, "");
+  const score = (u: string) =>
+    (/claude\.ai|anthropic\.com/.test(u) ? 2 : 0) + (u.includes("oauth") || u.includes("authorize") ? 2 : 0) + (u.includes("?") ? 1 : 0);
+  return cands
+    .map(clean)
+    .sort((a, b) => score(b) - score(a) || b.length - a.length)[0] ?? null;
+}
 
 export class ClaudeAuth {
   private pty: PtyHandle | null = null;
@@ -73,7 +97,7 @@ export class ClaudeAuth {
       pty = await spawnPty({
         cwd: this.cfg.home,
         env,
-        cols: 400, // wide → the authorize URL is one unbroken line
+        cols: 2000, // very wide → Ink never hard-wraps the long OAuth URL
         rows: 50,
         command: "claude setup-token",
       });
@@ -137,10 +161,13 @@ export class ClaudeAuth {
     this.buffer = (this.buffer + d).slice(-65536);
     const text = this.buffer.replace(ANSI_RE, "");
 
-    if (!this.url) {
-      const m = text.match(URL_RE);
-      if (m) {
-        this.url = m[0].replace(/[),.;:!?'"]+$/, "");
+    // Re-extract from the full raw buffer each tick: an OSC-8 hyperlink (the
+    // true URL) may arrive after an initial truncated plain-text match, so we
+    // upgrade to a better candidate until the user has authorized.
+    if (this.state === "starting" || this.state === "awaiting-code") {
+      const found = extractAuthUrl(this.buffer);
+      if (found && found !== this.url) {
+        this.url = found;
         if (this.state === "starting") this.state = "awaiting-code";
       }
     }
