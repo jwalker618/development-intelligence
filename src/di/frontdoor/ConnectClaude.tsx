@@ -47,6 +47,14 @@ export function ConnectClaude({ onDone, onSkip }: { onDone: () => void; onSkip: 
     return () => clearInterval(t);
   }, [inFlight, onDone]);
 
+  // Track how long we've been verifying so we can nudge the user if it stalls.
+  const [verifySecs, setVerifySecs] = useState(0);
+  useEffect(() => {
+    if (st !== "verifying") { setVerifySecs(0); return; }
+    const t = setInterval(() => setVerifySecs((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [st]);
+
   const start = async () => {
     setBusy(true);
     try { setStatus(await api.claudeAuthStart()); } catch (e) { setStatus({ state: "error", url: null, detail: msg(e), tail: "" }); }
@@ -97,7 +105,8 @@ export function ConnectClaude({ onDone, onSkip }: { onDone: () => void; onSkip: 
             <div style={{ fontSize: 18, fontWeight: 600, color: "var(--di-ink)", letterSpacing: "-0.01em" }}>Connection didn't complete</div>
             <div style={{ fontSize: 12.5, color: "var(--di-ink-mute)", marginTop: 5, lineHeight: 1.5 }}>The code may have expired or been entered wrong.</div>
           </div>
-          {status?.detail && <div className="di-mono" style={{ fontSize: 11, color: "#c98a8a", background: "#120a0a", border: "1px solid #3a1c1c", borderRadius: 9, padding: "11px 12px", marginBottom: 20 }}>{status.detail}</div>}
+          {status?.detail && <div className="di-mono" style={{ fontSize: 11, color: "#c98a8a", background: "#120a0a", border: "1px solid #3a1c1c", borderRadius: 9, padding: "11px 12px", marginBottom: 12 }}>{status.detail}</div>}
+          {status?.tail?.trim() && <TailView text={status.tail} />}
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <button className="di-btn" onClick={() => setManual(true)} style={{ flex: "0 0 auto", height: 44, padding: "0 16px", border: "1px solid var(--di-rule)", borderRadius: 11, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Use a token instead</button>
             <button className="di-btn" onClick={start} style={{ ...authCta, height: 44 }}><Icon name="rotate-cw" size={15} color="#3a140a" />Start over</button>
@@ -108,43 +117,58 @@ export function ConnectClaude({ onDone, onSkip }: { onDone: () => void; onSkip: 
   }
 
   const awaiting = st === "awaiting-code" || st === "verifying";
+  const hasUrl = !!status?.url;
+  const starting = st === "starting";
+  const slowVerify = st === "verifying" && verifySecs >= 30;
   return (
     <SignalScene>
       <AuthCard width={440}>
         <AuthHeader title="Connect Claude" subtitle="Claude Code needs to sign in to your Anthropic account. This runs once." />
-        <div style={{ display: "flex", flexDirection: "column", gap: 11, marginBottom: 18 }}>
-          <Step n={1} label={status?.url ? "Open this URL and sign in, then authorize" : "Press Begin to generate your sign-in link"}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 11, marginBottom: 16 }}>
+          <Step n={1} label={hasUrl ? "Open this URL and sign in, then authorize" : "Generate your sign-in link, then open it"}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 38, padding: "5px 8px 5px 12px", border: "1px solid var(--di-rule)", borderRadius: 9, background: "#0a1c2e" }}>
-              <span className="di-mono" title={status?.url ?? undefined} style={{ fontSize: 11.5, color: status?.url ? "#a9bccf" : "#5a7186", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status?.url ?? "link appears here after Begin"}</span>
-              <button className="di-btn" disabled={!status?.url} onClick={() => status?.url && void copyUrl(status.url)} style={{ height: 26, padding: "0 10px", border: 0, borderRadius: 6, background: "#12283f", color: copied ? "var(--di-pos)" : "var(--di-info)", fontSize: 11, fontWeight: 600, cursor: status?.url ? "pointer" : "default", opacity: status?.url ? 1 : 0.45, display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name={copied ? "check" : "copy"} size={12} />{copied ? "Copied" : "Copy"}</button>
-              {status?.url ? (
-                <a className="di-btn" href={status.url} target="_blank" rel="noreferrer noopener" style={{ height: 26, padding: "0 10px", border: 0, borderRadius: 6, background: "var(--di-info)", color: "#062b26", fontSize: 11, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none" }}><Icon name="external-link" size={12} />Open</a>
+              <span className="di-mono" title={status?.url ?? undefined} style={{ fontSize: 11.5, color: hasUrl ? "#a9bccf" : "#5a7186", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {status?.url ?? (starting ? "generating your link…" : "press Begin to generate a link")}
+              </span>
+              {hasUrl ? (
+                <>
+                  <button className="di-btn" onClick={() => status?.url && void copyUrl(status.url)} style={{ height: 26, padding: "0 10px", border: 0, borderRadius: 6, background: "#12283f", color: copied ? "var(--di-pos)" : "var(--di-info)", fontSize: 11, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name={copied ? "check" : "copy"} size={12} />{copied ? "Copied" : "Copy"}</button>
+                  <a className="di-btn" href={status.url!} target="_blank" rel="noreferrer noopener" style={{ height: 26, padding: "0 10px", border: 0, borderRadius: 6, background: "var(--di-info)", color: "#062b26", fontSize: 11, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none" }}><Icon name="external-link" size={12} />Open</a>
+                </>
               ) : (
-                <span className="di-btn" aria-disabled style={{ height: 26, padding: "0 10px", border: 0, borderRadius: 6, background: "var(--di-info)", color: "#062b26", fontSize: 11, fontWeight: 600, opacity: 0.45, display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="external-link" size={12} />Open</span>
+                <button className="di-btn" onClick={start} disabled={busy || starting} style={{ height: 26, padding: "0 12px", border: 0, borderRadius: 6, background: "var(--di-cta)", color: "#3a140a", fontSize: 11, fontWeight: 700, cursor: busy || starting ? "default" : "pointer", opacity: busy || starting ? 0.7 : 1, display: "inline-flex", alignItems: "center", gap: 5 }}>
+                  {starting ? <><MiniSpinner />Starting…</> : <><Icon name="link" size={12} color="#3a140a" />Begin</>}
+                </button>
               )}
             </div>
           </Step>
           <Step n={2} label="Paste the code claude.ai gives you">
-            <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="paste code here" spellCheck={false} disabled={!awaiting}
+            <input type="password" value={code} onChange={(e) => setCode(e.target.value)} placeholder="paste code here" spellCheck={false} disabled={!awaiting} autoComplete="off"
               onKeyDown={(e) => e.key === "Enter" && submit()} className="di-mono"
-              style={{ width: "100%", height: 46, textAlign: "center", border: "1px dashed #3e6794", borderRadius: 9, background: "#0a1c2e", color: "var(--di-ink)", fontSize: 15, letterSpacing: ".15em", outline: "none", boxSizing: "border-box" }} />
+              style={{ width: "100%", height: 40, textAlign: "center", border: "1px dashed #3e6794", borderRadius: 9, background: "#0a1c2e", color: "var(--di-ink)", fontSize: 13, letterSpacing: ".12em", outline: "none", boxSizing: "border-box", opacity: awaiting ? 1 : 0.5 }} />
           </Step>
         </div>
 
         {inFlight ? (
           <>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 13px", border: "1px solid #234a6e", borderRadius: 11, background: "#0c1e30", marginBottom: 14 }}>
-              <Spinner /><span style={{ fontSize: 12, color: "#a9bccf", flex: 1 }}>{st === "verifying" ? "Verifying…" : st === "starting" ? "Starting sign-in — fetching your link…" : "Waiting for you to authorize in the browser…"}</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 13px", border: "1px solid #234a6e", borderRadius: 11, background: "#0c1e30", marginBottom: 12 }}>
+              <Spinner /><span style={{ fontSize: 12, color: "#a9bccf", flex: 1 }}>{st === "verifying" ? "Verifying your code…" : starting ? "Starting sign-in — fetching your link…" : "Waiting for you to authorize in the browser…"}</span>
             </div>
+            {slowVerify && (
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "10px 12px", border: "1px solid #3a2f18", borderRadius: 10, background: "#181206", marginBottom: 12 }}>
+                <Icon name="alert-triangle" size={13} color="var(--di-warn)" style={{ marginTop: 1 }} />
+                <span style={{ fontSize: 11, color: "#d9c9a6", lineHeight: 1.5 }}>This is taking longer than usual. Check the output below — if the code was wrong, Cancel and start over, or paste a token instead.</span>
+              </div>
+            )}
+            {status?.tail?.trim() && (awaiting) && <TailView text={status.tail} />}
             <div style={{ display: "flex", gap: 10 }}>
               <button className="di-btn" onClick={cancel} style={{ flex: "0 0 auto", height: 44, padding: "0 16px", border: "1px solid var(--di-rule)", borderRadius: 11, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-              <button className="di-btn" onClick={submit} disabled={busy || !code.trim()} style={{ ...authCta, height: 44, opacity: busy || !code.trim() ? 0.6 : 1 }}>Connect</button>
+              {st !== "starting" && <button className="di-btn" onClick={submit} disabled={busy || !code.trim()} style={{ ...authCta, height: 44, opacity: busy || !code.trim() ? 0.6 : 1 }}>Connect</button>}
             </div>
           </>
         ) : (
-          <div style={{ display: "flex", gap: 10 }}>
-            <button className="di-btn" onClick={onSkip} style={{ flex: "0 0 auto", height: 44, padding: "0 16px", border: "1px solid var(--di-rule)", borderRadius: 11, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Skip for now</button>
-            <button className="di-btn" onClick={start} disabled={busy} style={{ ...authCta, height: 44, opacity: busy ? 0.6 : 1 }}>{busy ? "Starting…" : "Begin"}<Icon name="arrow-up" size={15} color="#3a140a" style={{ transform: "rotate(90deg)" }} /></button>
+          <div style={{ display: "flex", justifyContent: "center" }}>
+            <button className="di-btn" onClick={onSkip} style={{ height: 40, padding: "0 18px", border: "1px solid var(--di-rule)", borderRadius: 11, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Skip for now</button>
           </div>
         )}
         <div style={{ textAlign: "center", marginTop: 14 }}>
@@ -153,6 +177,18 @@ export function ConnectClaude({ onDone, onSkip }: { onDone: () => void; onSkip: 
       </AuthCard>
     </SignalScene>
   );
+}
+
+/** Scrubbed tail of the CLI output — turns the flow from a black box into
+ *  something the user can actually read when it stalls. */
+function TailView({ text }: { text: string }) {
+  return (
+    <div className="di-mono" style={{ maxHeight: 92, overflow: "auto", fontSize: 10, lineHeight: 1.5, color: "#7d93a8", background: "#08131f", border: "1px solid var(--di-rule)", borderRadius: 8, padding: "8px 10px", marginBottom: 12, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{text.trim()}</div>
+  );
+}
+
+function MiniSpinner() {
+  return <span style={{ width: 11, height: 11, flex: "0 0 auto", borderRadius: 999, border: "2px solid #3a140a", borderTopColor: "transparent", display: "inline-block", animation: "di-spin 0.8s linear infinite" }} />;
 }
 
 function ManualToken({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
