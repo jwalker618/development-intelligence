@@ -81,7 +81,12 @@ export class ClaudeOAuth {
         const t = setTimeout(() => ctrl.abort(), 15_000);
         const res = await fetch(endpoint, {
           method: "POST",
-          headers: { "content-type": "application/json", accept: "application/json" },
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+            // Required by Claude Code's OAuth token endpoint (from its own consts).
+            "anthropic-beta": "oauth-2025-04-20",
+          },
           body,
           signal: ctrl.signal,
         }).finally(() => clearTimeout(t));
