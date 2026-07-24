@@ -132,7 +132,15 @@ export function clearClaudeToken(cfg: GrottoConfig): void {
 export function sessionEnv(cfg: GrottoConfig): NodeJS.ProcessEnv {
   const env = gitEnv(cfg);
   const token = readClaudeToken(cfg);
-  if (token) env.CLAUDE_CODE_OAUTH_TOKEN = token;
+  if (token) {
+    env.CLAUDE_CODE_OAUTH_TOKEN = token;
+    // The subscription token is authoritative. A stray ANTHROPIC_API_KEY in the
+    // host env (a very common Railway setting) would otherwise put the CLI in
+    // API-key mode and shadow the OAuth token — the classic "auth failed" even
+    // though a valid setup-token is present. Remove it so OAuth wins.
+    delete env.ANTHROPIC_API_KEY;
+    delete env.ANTHROPIC_AUTH_TOKEN;
+  }
   return env;
 }
 

@@ -298,6 +298,11 @@ export const api = {
     }),
   chatInterrupt: (id: string) =>
     req(`/api/sessions/${id}/chat/interrupt`, { method: "POST" }),
+  chatEffort: (id: string, effort: string | null) =>
+    req(`/api/sessions/${id}/chat/effort`, {
+      method: "POST",
+      body: JSON.stringify({ effort }),
+    }),
   chatModel: (id: string, model: string | null) =>
     req(`/api/sessions/${id}/chat/model`, {
       method: "POST",

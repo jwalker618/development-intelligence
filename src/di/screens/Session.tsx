@@ -10,14 +10,42 @@ const MODES: CavemanMode[] = ["off", "lite", "full", "ultra"];
 const BAR_H = [22, 46, 70, 100];
 const BAR_TINT = ["#2b4056", "#5a4326", "#8a5a24", "#a8641f"];
 
+// `id` is the real SDK model identifier passed to query(); `label` is display.
 const MODELS = [
-  { id: "Sonnet 4.5", sub: "Balanced · best for review loops" },
-  { id: "Opus 4.1", sub: "Deepest reasoning · slower, pricier" },
-  { id: "Haiku 4.5", sub: "Fastest · light edits and chores" },
+  { id: "claude-sonnet-5", label: "Sonnet 5", sub: "Balanced · best for review loops" },
+  { id: "claude-opus-4-8", label: "Opus 4.8", sub: "Deepest reasoning · slower, pricier" },
+  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", sub: "Fastest · light edits and chores" },
+  { id: "claude-fable-5", label: "Fable 5", sub: "Creative long-form · Claude 5 family" },
 ];
 
+const EFFORTS = [
+  { id: "low", label: "Low", sub: "Minimal thinking · fastest" },
+  { id: "medium", label: "Medium", sub: "Moderate thinking" },
+  { id: "high", label: "High", sub: "Deep reasoning · default" },
+  { id: "xhigh", label: "X-High", sub: "Deeper than high" },
+  { id: "max", label: "Max", sub: "Maximum effort" },
+];
+
+/** Haiku has no effort levels; everything else (incl. the default) does. */
+function modelSupportsEffort(id?: string | null): boolean {
+  return !(id ?? "").toLowerCase().includes("haiku");
+}
+
+/** Friendly label for a raw SDK model id (which may carry a date suffix). */
+function modelLabel(id?: string | null): string {
+  if (!id) return "Default model";
+  const exact = MODELS.find((m) => m.id === id);
+  if (exact) return exact.label;
+  const l = id.toLowerCase();
+  if (l.includes("opus")) return "Opus";
+  if (l.includes("sonnet")) return "Sonnet";
+  if (l.includes("haiku")) return "Haiku";
+  if (l.includes("fable")) return "Fable";
+  return id;
+}
+
 export function SessionScreen({
-  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, onModel, onAddPin, onRemovePin, onSearch,
+  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, onModel, onEffort, onAddPin, onRemovePin, onSearch,
 }: {
   s: SessionState;
   chat: ChatState;
@@ -30,6 +58,7 @@ export function SessionScreen({
   onApproval: (id: string, d: "allow" | "always" | "deny") => void;
   onInterrupt: () => void;
   onModel: (m: string) => void;
+  onEffort: (e: string | null) => void;
   onAddPin: (icon: string, label: string) => void;
   onRemovePin: (id: string) => void;
   onSearch: (q: string) => Promise<SearchHit[]>;
@@ -147,11 +176,13 @@ export function SessionScreen({
             </button>
           )}
           <span style={{ flex: 1 }} />
+          {/* reasoning-effort picker — only for models that support it */}
+          {modelSupportsEffort(chat.model) && <EffortPicker value={chat.effort} onEffort={onEffort} />}
           {/* model picker (41a) */}
           <div style={{ position: "relative" }}>
             <button className="di-btn" onClick={() => setModelMenu((m) => !m)} style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 28, padding: "0 12px", border: "1px solid #34608c", borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
               <span style={{ width: 7, height: 7, borderRadius: 999, background: "var(--di-info)" }} />
-              <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>{chat.model ?? "Sonnet 4.5"}</span>
+              <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>{modelLabel(chat.model)}</span>
               <Icon name="chevron-down" size={13} color="var(--cc-ink-mute)" />
             </button>
             {modelMenu && (
@@ -160,11 +191,11 @@ export function SessionScreen({
                 <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 260, zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
                   <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9 }}>Model for this session</div>
                   {MODELS.map((m) => {
-                    const active = (chat.model ?? "Sonnet 4.5") === m.id;
+                    const active = chat.model === m.id;
                     return (
                       <button key={m.id} className="di-row di-btn" onClick={() => { onModel(m.id); setModelMenu(false); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: "pointer", marginBottom: 2 }}>
                         <Icon name={active ? "check-circle-2" : "circle"} size={15} color={active ? "var(--di-info)" : "#33475c"} />
-                        <span style={{ flex: 1 }}><span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{m.id}</span><span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{m.sub}</span></span>
+                        <span style={{ flex: 1 }}><span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{m.label}</span><span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{m.sub}</span></span>
                       </button>
                     );
                   })}
@@ -309,6 +340,41 @@ const ROLE_META: Record<SearchHit["role"], { icon: string; color: string; label:
   approval: { icon: "shield", color: "var(--di-warn)", label: "approval" },
   system: { icon: "alert-triangle", color: "var(--di-neg)", label: "system" },
 };
+
+/** Reasoning-effort picker — sits beside the model pill. Default is High. */
+function EffortPicker({ value, onEffort }: { value: string | null; onEffort: (e: string | null) => void }) {
+  const [open, setOpen] = useState(false);
+  const current = EFFORTS.find((e) => e.id === value) ?? EFFORTS.find((e) => e.id === "high")!;
+  return (
+    <div style={{ position: "relative" }}>
+      <button className="di-btn" onClick={() => setOpen((o) => !o)} title="Reasoning effort" style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 28, padding: "0 11px", border: "1px solid #34608c", borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
+        <Icon name="flame" size={12} color="var(--di-warn)" />
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>{current.label}</span>
+        <Icon name="chevron-down" size={13} color="var(--cc-ink-mute)" />
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+          <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 230, zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
+            <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9 }}>Reasoning effort</div>
+            {EFFORTS.map((e) => {
+              const active = current.id === e.id;
+              return (
+                <button key={e.id} className="di-row di-btn" onClick={() => { onEffort(e.id); setOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: "pointer", marginBottom: 2 }}>
+                  <Icon name={active ? "check-circle-2" : "circle"} size={15} color={active ? "var(--di-warn)" : "#33475c"} />
+                  <span style={{ flex: 1 }}><span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{e.label}</span><span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{e.sub}</span></span>
+                </button>
+              );
+            })}
+            <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 8px 4px", borderTop: "1px solid #17293a", marginTop: 4 }}>
+              <Icon name="lock" size={12} color="var(--di-ink-mute)" /><span style={{ fontSize: 10.5, color: "#6f8296" }}>Higher effort = deeper thinking, more tokens. Applies to your next message.</span>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 /** ⌘K transcript search — live against /api/sessions/:id/transcript/search. */
 function SearchOverlay({ onSearch, onClose }: { onSearch: (q: string) => Promise<SearchHit[]>; onClose: () => void }) {

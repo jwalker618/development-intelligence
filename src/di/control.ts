@@ -200,6 +200,7 @@ export interface ChatState {
   messages: ChatMsg[];
   busy: boolean;
   model: string | null;
+  effort: string | null;
   pendingApprovalId: string | null;
 }
 
@@ -253,6 +254,7 @@ export function subscribeChat(
           messages: foldHello((f.events as ChatEvent[]) ?? []),
           busy: !!f.busy,
           model: (f.model as string) ?? null,
+          effort: (f.effort as string) ?? null,
           pendingApprovalId: f.pendingApproval ? String((f.pendingApproval as ChatEvent).id ?? "") : null,
         });
       } else if (f.t === "event") {
@@ -263,6 +265,8 @@ export function subscribeChat(
         handlers.onState({ busy: !!f.busy });
       } else if (f.t === "model") {
         handlers.onState({ model: (f.model as string) ?? null });
+      } else if (f.t === "effort") {
+        handlers.onState({ effort: (f.effort as string) ?? null });
       } else if (f.t === "approval_cleared") {
         handlers.onState({ pendingApprovalId: null });
       }

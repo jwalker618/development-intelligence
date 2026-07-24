@@ -243,6 +243,16 @@ router.on("POST", "/api/sessions/:id/chat/model", async ({ params, body }) => {
   return { ok: true };
 });
 
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+router.on("POST", "/api/sessions/:id/chat/effort", async ({ params, body }) => {
+  const b = (body ?? {}) as { effort?: string | null };
+  const e = b.effort?.trim() || null;
+  if (e && !EFFORTS.includes(e as (typeof EFFORTS)[number])) throw new HttpError(400, "invalid effort");
+  const s = manager.get(params.id);
+  await chats.get(s.id, s.dir).setEffort(e as (typeof EFFORTS)[number] | null);
+  return { ok: true };
+});
+
 router.on("POST", "/api/sessions", async ({ body }) => {
   const b = (body ?? {}) as { repo?: string; branch?: string };
   if (!b.repo) throw new HttpError(400, "repo is required");

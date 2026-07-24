@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   query,
+  type EffortLevel,
   type PermissionResult,
   type PermissionUpdate,
   type Query,
@@ -39,6 +40,7 @@ export interface ChatEvent {
 interface ChatMeta {
   claudeSessionId?: string;
   model?: string;
+  effort?: EffortLevel;
 }
 
 const HISTORY_LIMIT = 800; // events replayed to a connecting client
@@ -165,6 +167,7 @@ export class AgentChat {
         events: this.events,
         busy: this.busy,
         model: this.meta.model ?? null,
+        effort: this.meta.effort ?? null,
         pendingApproval: this.pending ? this.lastApprovalEvent() : null,
       }),
     );
@@ -198,11 +201,29 @@ export class AgentChat {
     else this.inputBacklog.push(msg);
   }
 
+  get effort(): EffortLevel | null {
+    return this.meta.effort ?? null;
+  }
+
   async setModel(model: string | null): Promise<void> {
     this.meta.model = model ?? undefined;
     this.saveMeta();
     if (this.q) await this.q.setModel(model ?? undefined).catch(() => undefined);
     this.broadcast({ t: "model", model });
+  }
+
+  /** Reasoning effort. The SDK has no live setter (creation-time option), so we
+   *  recycle an idle query — the next turn resumes the same conversation with
+   *  the new effort. A busy query keeps its effort until the current turn ends. */
+  async setEffort(effort: EffortLevel | null): Promise<void> {
+    this.meta.effort = effort ?? undefined;
+    this.saveMeta();
+    if (this.q && !this.busy) {
+      const q = this.q;
+      this.q = null;
+      await q.interrupt().catch(() => undefined);
+    }
+    this.broadcast({ t: "effort", effort });
   }
 
   async interrupt(): Promise<void> {
@@ -265,6 +286,7 @@ export class AgentChat {
         env,
         resume: this.meta.claudeSessionId,
         model: this.meta.model,
+        ...(this.meta.effort ? { effort: this.meta.effort } : {}),
         // Load the user's CLAUDE_CONFIG_DIR settings + the repo's CLAUDE.md —
         // this is what keeps caveman hooks and RTK in the loop headlessly.
         settingSources: ["user", "project"],
