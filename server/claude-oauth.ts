@@ -12,14 +12,18 @@ import { writeClaudeToken, type GrottoConfig } from "./config.js";
  * (client is a native/public client, so there is no secret).
  */
 
+// These match the CURRENT `claude setup-token` v2.1.x flow exactly (captured
+// from the real authorize URL): claude.com host, platform.claude.com redirect,
+// user:inference scope. The older claude.ai / console.anthropic.com values are
+// rejected by this client_id with "Invalid request format".
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
-const REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback";
-const SCOPE = "org:create_api_key user:profile user:inference";
+const AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize";
+const REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
+const SCOPE = "user:inference";
 // Try the current host first, then the classic one; whichever answers wins.
 const TOKEN_ENDPOINTS = [
-  "https://console.anthropic.com/v1/oauth/token",
   "https://platform.claude.com/v1/oauth/token",
+  "https://console.anthropic.com/v1/oauth/token",
 ];
 
 function b64url(buf: Buffer): string {
