@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { api, type SessionInfo } from "../api";
 import {
   SAMPLE, buildTree, parseDiff, setCavemanMode, subscribeChat, toChanges, toDialMode, toTimeline,
   type ChatMsg, type ChatState, type TreeNode,
 } from "./control";
 import { seedState, type CavemanMode, type Hunk, type SessionState, type Verdict } from "./state";
 
-export type Conn = "loading" | "nosession" | "connecting" | "live" | "offline" | "reauth" | "error";
+export type Conn = "loading" | "connecting" | "live" | "offline" | "reauth" | "error";
 
 export interface Live {
   state: SessionState;
+  sessions: SessionInfo[];
   chat: ChatState;
   tree: TreeNode | null;
   activeDiff: { path: string; hunks: Hunk[] } | null;
@@ -34,9 +35,11 @@ export interface Actions {
 
 const is401 = (e: unknown) => e instanceof Error && /\b401\b/.test(e.message);
 
-export function useControl(): Live {
-  const [sessionId, setSessionId] = useState<string | null>(null);
+/** Live data for one session (chosen by the app). Also lists all sessions for
+ *  the nav dropdown. Pass null before a session is chosen. */
+export function useControl(sessionId: string | null): Live {
   const [state, setState] = useState<SessionState>(seedState);
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [chat, setChat] = useState<ChatState>({ messages: [], busy: false, model: null, pendingApprovalId: null });
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [activeDiff, setActiveDiff] = useState<{ path: string; hunks: Hunk[] } | null>(null);
@@ -44,57 +47,53 @@ export function useControl(): Live {
   const [conn, setConn] = useState<Conn>("loading");
   const [error, setError] = useState<string | null>(null);
   const reviewed = useRef(new Set<string>());
-  const approvalTitle = useRef<string | null>(null);
 
   const guard = useCallback((e: unknown) => {
     if (is401(e)) { setConn("reauth"); return; }
     setError(e instanceof Error ? e.message : String(e));
   }, []);
 
-  // Load the git/caveman/tree slices for a session and build the view model.
   const loadSession = useCallback(async (id: string) => {
     try {
-      const [cav, git, log, treeRes] = await Promise.all([
-        api.caveman(), api.gitStatus(id), api.gitLog(id), api.tree(id),
+      const [cav, git, log, treeRes, list] = await Promise.all([
+        api.caveman(), api.gitStatus(id), api.gitLog(id), api.tree(id), api.sessions(),
       ]);
-      const info = (await api.sessions()).find((s) => s.id === id);
-      approvalTitle.current = info?.approval ?? null;
+      setSessions(list);
+      const info = list.find((s) => s.id === id);
       setCavemanSavings(cav.savings);
       setTree(buildTree(treeRes.files, info?.repo ?? "repo"));
       setState((prev) => ({
         ...prev,
-        repoCount: 1,
+        repoCount: list.length || 1,
         branch: git.branch || prev.branch,
         ahead: git.ahead, behind: git.behind,
         caveman: { mode: toDialMode(cav.mode), savedPct: prev.caveman.savedPct },
         timeline: toTimeline(log.entries),
-        changes: toChanges(git, reviewed.current, approvalTitle.current),
+        changes: toChanges(git, reviewed.current, info?.approval ?? null),
       }));
     } catch (e) { guard(e); }
   }, [guard]);
 
-  // Bootstrap: find a session (first live one), then load + subscribe.
+  // Load + subscribe whenever the chosen session changes.
   useEffect(() => {
+    setActiveDiff(null);
+    reviewed.current = new Set();
+    if (!sessionId) { setConn("live"); return; }
+    setConn("loading");
     let stop: (() => void) | undefined;
-    (async () => {
-      try {
-        const sessions = await api.sessions();
-        if (sessions.length === 0) { setConn("nosession"); return; }
-        const id = sessions[0].id;
-        setSessionId(id);
-        await loadSession(id);
-        stop = subscribeChat(id, {
-          onState: (patch) => setChat((c) => ({ ...c, ...patch })),
-          onEvent: (ev) => setChat((c) => ({ ...c, messages: [...c.messages, ...foldOne(ev)] })),
-          onDelta: (text) => setChat((c) => appendDelta(c, text)),
-          onConn: (cc) => setConn(cc),
-        });
-      } catch (e) { guard(e); }
+    void (async () => {
+      await loadSession(sessionId);
+      stop = subscribeChat(sessionId, {
+        onState: (patch) => setChat((c) => ({ ...c, ...patch })),
+        onEvent: (ev) => setChat((c) => ({ ...c, messages: [...c.messages, ...foldOne(ev)] })),
+        onDelta: (text) => setChat((c) => appendDelta(c, text)),
+        onConn: (cc) => setConn(cc),
+      });
     })();
     return () => stop?.();
-  }, [loadSession, guard]);
+  }, [sessionId, loadSession]);
 
-  // Mirror the caveman flag on a ~15s poll (design invariant).
+  // Mirror the caveman flag on a ~15s poll.
   useEffect(() => {
     if (!sessionId) return;
     const t = setInterval(async () => {
@@ -109,45 +108,25 @@ export function useControl(): Live {
 
   const actions: Actions = {
     setCaveman: (m) => {
-      setState((p) => ({ ...p, caveman: { ...p.caveman, mode: m } })); // optimistic
+      setState((p) => ({ ...p, caveman: { ...p.caveman, mode: m } }));
       void (async () => {
-        try {
-          const data = await setCavemanMode(m === "off" ? null : m);
-          setCavemanSavings(data.savings ?? null);
-          setState((p) => ({ ...p, caveman: { ...p.caveman, mode: toDialMode(data.mode) } }));
-        } catch (e) { guard(e); }
-      })();
-    },
-    commitSync: () => {
-      if (!sessionId) return;
-      void (async () => {
-        try { await api.gitOp(sessionId, { op: "sync" }); await loadSession(sessionId); }
+        try { const d = await setCavemanMode(m === "off" ? null : m); setCavemanSavings(d.savings ?? null); setState((p) => ({ ...p, caveman: { ...p.caveman, mode: toDialMode(d.mode) } })); }
         catch (e) { guard(e); }
       })();
     },
-    selectChange: (path) => {
-      if (!sessionId) return;
-      void (async () => {
-        try { const { diff } = await api.gitDiff(sessionId, path); setActiveDiff({ path, hunks: parseDiff(diff) }); }
-        catch (e) { guard(e); }
-      })();
-    },
-    markReviewed: (path) => {
-      reviewed.current.add(path);
-      setState((p) => ({ ...p, changes: p.changes.map((c) => c.path === path ? { ...c, reviewed: true } : c) }));
-    },
-    setVerdict: (path, hunk, v) => setActiveDiff((d) =>
-      d && d.path === path ? { ...d, hunks: d.hunks.map((h, i) => i === hunk ? { ...h, verdict: h.verdict === v ? null : v } : h) } : d),
+    commitSync: () => { if (sessionId) void api.gitOp(sessionId, { op: "sync" }).then(() => loadSession(sessionId)).catch(guard); },
+    selectChange: (path) => { if (sessionId) void api.gitDiff(sessionId, path).then(({ diff }) => setActiveDiff({ path, hunks: parseDiff(diff) })).catch(guard); },
+    markReviewed: (path) => { reviewed.current.add(path); setState((p) => ({ ...p, changes: p.changes.map((c) => c.path === path ? { ...c, reviewed: true } : c) })); },
+    setVerdict: (path, hunk, v) => setActiveDiff((d) => d && d.path === path ? { ...d, hunks: d.hunks.map((h, i) => i === hunk ? { ...h, verdict: h.verdict === v ? null : v } : h) } : d),
     sendMessage: (text) => { if (sessionId && text.trim()) void api.chatMessage(sessionId, text).catch(guard); },
     resolveApproval: (id, decision) => { if (sessionId) void api.chatApproval(sessionId, id, decision).catch(guard); },
     interrupt: () => { if (sessionId) void api.chatInterrupt(sessionId).catch(guard); },
     refresh: () => { if (sessionId) void loadSession(sessionId); },
   };
 
-  return { state, chat, tree, activeDiff, cavemanSavings, sample: SAMPLE, conn, error, actions };
+  return { state, sessions, chat, tree, activeDiff, cavemanSavings, sample: SAMPLE, conn, error, actions };
 }
 
-// event-fold helpers (kept out of render to avoid re-alloc churn)
 function foldOne(ev: { kind?: string; [k: string]: unknown }): ChatMsg[] {
   const id = String(ev.seq ?? Math.floor(performance.now()));
   if (ev.kind === "user") return [{ id, role: "user", text: String(ev.text ?? "") }];
@@ -159,9 +138,6 @@ function foldOne(ev: { kind?: string; [k: string]: unknown }): ChatMsg[] {
 
 function appendDelta(c: ChatState, text: string): ChatState {
   const last = c.messages[c.messages.length - 1];
-  if (last && last.role === "agent") {
-    const messages = c.messages.slice(0, -1).concat({ ...last, text: last.text + text });
-    return { ...c, messages };
-  }
+  if (last && last.role === "agent") return { ...c, messages: c.messages.slice(0, -1).concat({ ...last, text: last.text + text }) };
   return { ...c, messages: [...c.messages, { id: `d${c.messages.length}`, role: "agent", text }] };
 }

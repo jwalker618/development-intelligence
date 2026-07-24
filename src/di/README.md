@@ -20,6 +20,23 @@ reference — recreated here in React, not copied.
   review hero — semantic diff + per-hunk verdicts), `Files` (35c),
   `Preview` (35d), `Tasks` (35e, task runner + typed-challenge confirm gate).
 
+## Front door (`frontdoor/`) — the layer that wraps the workbench
+
+Built from the SURFACES pack (turns 36–42; `docs/design-source/SURFACES.md`).
+`DIApp.tsx` now orchestrates: **Login → (Connect Claude if not connected) →
+Sessions Home → Workbench**, with the nav dropdown for switching.
+
+- `frontdoor/SignalCard.tsx` — the shared signal-motif auth shell (DI mark, rings, card).
+- `frontdoor/Login.tsx` — token → MFA code → throttle → 401 re-auth (36e/38a-c), via `api.login`.
+- `frontdoor/ConnectClaude.tsx` — guided connect (38d-g) via `/api/claude-auth/*` + manual token via `/api/claude-token`. **Adapted to the real `setup-token` backend**: you open the minted URL, authorize, and paste the code claude.ai returns (the mock 38d shows the reverse device-code direction; the account email/plan on 38e aren't fabricated since the server doesn't expose them).
+- `frontdoor/SessionsHome.tsx` — launcher (37a/b): live repo search (`/api/repos`) + Continue grid (`/api/sessions`); new-session (37c-e) via `POST /api/sessions`. **Adapted**: base branch is a typed field (no list-branches endpoint) and provisioning is one indeterminate step (the server clones inside the POST).
+- `Shell.tsx` nav dropdown (37f) — session quick-switch + New + the 5 views + All-sessions/Settings/Appearance; the flush-nav glyph swaps `square-arrow-out-down-right`↔`arrow-up-left` on open.
+
+**Still to build from SURFACES (next slices):** Settings modal (39a-e; today the
+gear routes to Connect Claude), close/delete session (37g), the empty/loading/
+offline states (40), in-screen flows (41: model picker, file editor, task run
+view), and Preview-for-real (42).
+
 ## Control-plane wiring (live)
 `control.ts` maps the server shapes → the DI view-model and holds the actions
 (over `src/api.ts`, the existing client). `useControl.ts` bootstraps a session,
