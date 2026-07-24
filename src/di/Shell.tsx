@@ -12,6 +12,7 @@ export interface FrameProps {
   onNewSession: () => void;
   onAllSessions: () => void;
   onSettings: () => void;
+  onCloseSession: (id: string) => void;
 }
 
 /** The consistent frame: coral flush-nav (opens the 37f dropdown), 340px theme
@@ -66,7 +67,9 @@ function NavDropdown({ p, onClose }: { p: FrameProps; onClose: () => void }) {
                   <span className="di-mono" style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--di-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.repo.split("/").pop()}</span>
                   <span style={{ display: "block", fontSize: 10, color: current ? "#a9bccf" : "#6f8296", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(s.branch ?? "—")}{current ? " · this session" : s.needsYou ? " · needs you" : s.ptyLive ? " · working now" : ""}</span>
                 </span>
-                {current && <Icon name="check" size={14} color="var(--di-info)" />}
+                {current
+                  ? <span role="button" tabIndex={0} className="di-btn" onClick={(e) => { e.stopPropagation(); act(() => p.onCloseSession(s.id)); }} aria-label="Close session" title="Close session" style={{ display: "flex", cursor: "pointer" }}><Icon name="x" size={13} color="var(--di-ink-mute)" /></span>
+                  : <Icon name="chevron-right" size={13} color="#3e5670" />}
               </button>
             );
           })}

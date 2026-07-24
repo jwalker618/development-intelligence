@@ -30,6 +30,7 @@ export interface Actions {
   sendMessage: (text: string) => void;
   resolveApproval: (id: string, decision: "allow" | "always" | "deny") => void;
   interrupt: () => void;
+  setModel: (model: string) => void;
   refresh: () => void;
 }
 
@@ -121,6 +122,7 @@ export function useControl(sessionId: string | null): Live {
     sendMessage: (text) => { if (sessionId && text.trim()) void api.chatMessage(sessionId, text).catch(guard); },
     resolveApproval: (id, decision) => { if (sessionId) void api.chatApproval(sessionId, id, decision).catch(guard); },
     interrupt: () => { if (sessionId) void api.chatInterrupt(sessionId).catch(guard); },
+    setModel: (model) => { if (sessionId) { setChat((c) => ({ ...c, model })); void api.chatModel(sessionId, model).catch(guard); } },
     refresh: () => { if (sessionId) void loadSession(sessionId); },
   };
 

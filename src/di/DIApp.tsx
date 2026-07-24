@@ -6,6 +6,8 @@ import { Frame } from "./Shell";
 import { Login } from "./frontdoor/Login";
 import { ConnectClaude } from "./frontdoor/ConnectClaude";
 import { SessionsHome } from "./frontdoor/SessionsHome";
+import { Settings } from "./frontdoor/Settings";
+import { CloseSession } from "./frontdoor/CloseSession";
 import { useControl } from "./useControl";
 import { SessionScreen } from "./screens/Session";
 import { ChangesScreen } from "./screens/Changes";
@@ -18,7 +20,7 @@ import { type Theme, type View } from "./state";
 const THEME_KEY = "di.theme";
 const VIEW_KEY = "di.view";
 
-type Route = "home" | "connect" | "workbench";
+type Route = "home" | "connect" | "settings" | "workbench";
 
 export default function DIApp() {
   const [authed, setAuthed] = useState(() => !!getToken());
@@ -27,49 +29,69 @@ export default function DIApp() {
   return <Root onReauth={() => setReauth(true)} />;
 }
 
+const SESSION_KEY = "di.session";
+
 function Root({ onReauth }: { onReauth: () => void }) {
-  const [route, setRoute] = useState<Route>("home");
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const stored = localStorage.getItem(SESSION_KEY);
+  const [route, setRoute] = useState<Route>(stored ? "workbench" : "home");
+  const [sessionId, setSessionIdState] = useState<string | null>(stored);
   const [theme, setThemeState] = useState<Theme>(() => (localStorage.getItem(THEME_KEY) as Theme) || "indigo");
 
+  const setTheme = (t: Theme) => { setThemeState(t); document.documentElement.setAttribute("data-di-theme", t); localStorage.setItem(THEME_KEY, t); };
   useEffect(() => { document.documentElement.setAttribute("data-di-theme", theme); localStorage.setItem(THEME_KEY, theme); }, [theme]);
 
-  // After login, land on Connect Claude if it isn't connected yet — nothing
-  // the agent does works without it. Skippable → Sessions Home.
+  // Persist the chosen session so a refresh returns to the workbench, not home.
+  const setSessionId = (id: string | null) => { setSessionIdState(id); if (id) localStorage.setItem(SESSION_KEY, id); else localStorage.removeItem(SESSION_KEY); };
+
   useEffect(() => {
+    // Only gate on Connect Claude for a fresh landing (no session yet).
+    if (stored) return;
     void api.claudeToken().then((r) => { if (!r.source) setRoute("connect"); }).catch(() => undefined);
-  }, []);
+  }, [stored]);
 
   const openSession = (id: string) => { setSessionId(id); setRoute("workbench"); };
+  const backToWork = () => setRoute(sessionId ? "workbench" : "home");
 
-  if (route === "connect") return <ConnectClaude onDone={() => setRoute("home")} onSkip={() => setRoute("home")} />;
-  if (route === "home" || !sessionId) return <SessionsHome onOpen={openSession} onSettings={() => setRoute("connect")} />;
+  if (route === "connect") return <ConnectClaude onDone={backToWork} onSkip={backToWork} />;
+  if (route === "settings") return (
+    <Settings theme={theme} onTheme={setTheme} onClose={backToWork}
+      onReconnect={() => setRoute("connect")}
+      onSignOut={onReauth} />
+  );
+  if (route === "home" || !sessionId) return <SessionsHome onOpen={openSession} onSettings={() => setRoute("settings")} />;
 
   return (
     <Workbench
-      sessionId={sessionId} theme={theme} onTheme={setThemeState}
+      sessionId={sessionId} theme={theme} onTheme={setTheme}
       onSwitchSession={setSessionId}
       onNewSession={() => setRoute("home")}
       onAllSessions={() => setRoute("home")}
-      onSettings={() => setRoute("connect")}
+      onSettings={() => setRoute("settings")}
+      onConnect={() => setRoute("connect")}
+      onClosed={() => { setSessionId(null); setRoute("home"); }}
       onReauth={onReauth}
     />
   );
 }
 
 function Workbench({
-  sessionId, theme, onTheme, onSwitchSession, onNewSession, onAllSessions, onSettings, onReauth,
+  sessionId, theme, onTheme, onSwitchSession, onNewSession, onAllSessions, onSettings, onConnect, onClosed, onReauth,
 }: {
   sessionId: string; theme: Theme; onTheme: (t: Theme) => void;
-  onSwitchSession: (id: string) => void; onNewSession: () => void; onAllSessions: () => void; onSettings: () => void; onReauth: () => void;
+  onSwitchSession: (id: string) => void; onNewSession: () => void; onAllSessions: () => void; onSettings: () => void;
+  onConnect: () => void; onClosed: () => void; onReauth: () => void;
 }) {
   const [view, setView] = useState<View>(() => (localStorage.getItem(VIEW_KEY) as View) || "changes");
+  const [closeTarget, setCloseTarget] = useState<string | null>(null);
+  const [claudeConnected, setClaudeConnected] = useState<boolean | null>(null);
   const live = useControl(sessionId);
   const changeView = (v: View) => { setView(v); localStorage.setItem(VIEW_KEY, v); };
 
   useEffect(() => { if (live.conn === "reauth") onReauth(); }, [live.conn, onReauth]);
+  useEffect(() => { void api.claudeToken().then((r) => setClaudeConnected(!!r.source)).catch(() => setClaudeConnected(true)); }, []);
 
   const { state, sessions, chat, tree, activeDiff, cavemanSavings, sample, conn, error, actions } = live;
+  const target = sessions.find((s) => s.id === closeTarget);
 
   return (
     <div className="di-app">
@@ -78,17 +100,19 @@ function Workbench({
         repoCount={state.repoCount}
         sessions={sessions} currentSessionId={sessionId}
         onSwitchSession={onSwitchSession} onNewSession={onNewSession} onAllSessions={onAllSessions} onSettings={onSettings}
+        onCloseSession={setCloseTarget}
         screen={
           <>
-            {view === "session" && <SessionScreen s={state} chat={chat} cavemanSavings={cavemanSavings} sample={sample} onCaveman={actions.setCaveman} onSend={actions.sendMessage} onApproval={actions.resolveApproval} onInterrupt={actions.interrupt} />}
-            {view === "changes" && <ChangesScreen s={state} activeDiff={activeDiff} sample={sample} onSelect={actions.selectChange} onVerdict={actions.setVerdict} onReviewed={actions.markReviewed} onCommitSync={actions.commitSync} />}
-            {view === "files" && <FilesScreen tree={tree} onOpen={() => undefined} />}
+            {view === "session" && <SessionScreen s={state} chat={chat} cavemanSavings={cavemanSavings} sample={sample} claudeConnected={claudeConnected} onConnect={onConnect} onCaveman={actions.setCaveman} onSend={actions.sendMessage} onApproval={actions.resolveApproval} onInterrupt={actions.interrupt} onModel={actions.setModel} />}
+            {view === "changes" && <ChangesScreen s={state} activeDiff={activeDiff} sample={sample} loading={conn === "loading"} onSelect={actions.selectChange} onVerdict={actions.setVerdict} onReviewed={actions.markReviewed} onCommitSync={actions.commitSync} />}
+            {view === "files" && <FilesScreen tree={tree} sessionId={sessionId} />}
             {view === "preview" && <PreviewScreen s={state} sample={sample} onViewport={() => undefined} onSendToAgent={() => changeView("session")} />}
             {view === "tasks" && <TasksScreen s={state} sample={sample} />}
           </>
         }
       />
       <ConnBanner conn={conn} error={error} onRetry={actions.refresh} />
+      {target && <CloseSession id={target.id} repo={target.repo} branch={target.branch} onCancel={() => setCloseTarget(null)} onClosed={() => { setCloseTarget(null); onClosed(); }} />}
     </div>
   );
 }

@@ -5,7 +5,9 @@ import {
   FolderTree, GitBranch, GitCommitHorizontal, GitCompare, Globe, Loader, Lock, MessagesSquare,
   Monitor, MonitorSmartphone, Move, Pin, Play, Plus, Radio, RefreshCw, Rocket, RotateCw, ScanEye,
   Search, Settings, ShieldAlert, Signal, Smartphone, SquareArrowOutDownRight, SquareTerminal, Tablet,
-  Terminal, Upload, Wifi, X, type LucideIcon,
+  Terminal, Upload, Wifi, X,
+  Sparkles, Download, Save, MousePointerClick, MonitorOff, CheckCheck, FileImage, Image, File, FolderOpen,
+  Pause, Square, Flame, MinusCircle, type LucideIcon,
 } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 
@@ -27,6 +29,9 @@ const ICONS: Record<string, LucideIcon> = {
   search: Search, "shield-alert": ShieldAlert, signal: Signal, smartphone: Smartphone,
   "square-arrow-out-down-right": SquareArrowOutDownRight, "square-terminal": SquareTerminal,
   tablet: Tablet, terminal: Terminal, upload: Upload, wifi: Wifi, x: X,
+  sparkles: Sparkles, download: Download, save: Save, "mouse-pointer-click": MousePointerClick,
+  "monitor-off": MonitorOff, "check-check": CheckCheck, "file-image": FileImage, image: Image,
+  file: File, "folder-open": FolderOpen, pause: Pause, square: Square, flame: Flame, "minus-circle": MinusCircle,
 };
 
 /** Lucide icon by kebab-case name (the design references names verbatim). */

@@ -5,16 +5,18 @@ import type { SAMPLE } from "../control";
 import type { Change, Hunk, SessionState, Verdict } from "../state";
 
 export function ChangesScreen({
-  s, activeDiff, sample, onSelect, onVerdict, onReviewed, onCommitSync,
+  s, activeDiff, sample, loading, onSelect, onVerdict, onReviewed, onCommitSync,
 }: {
   s: SessionState;
   activeDiff: { path: string; hunks: Hunk[] } | null;
   sample: typeof SAMPLE;
+  loading?: boolean;
   onSelect: (path: string) => void;
   onVerdict: (path: string, hunk: number, v: Verdict) => void;
   onReviewed: (path: string) => void;
   onCommitSync: () => void;
 }) {
+  const clean = !loading && s.changes.length === 0;
   const needsYou = s.changes.filter((c) => c.needsYou);
   const awaiting = s.changes.filter((c) => !c.needsYou);
   const staged = s.changes.filter((c) => !c.needsYou).length;
@@ -72,9 +74,25 @@ export function ChangesScreen({
           </div>
         )}
 
-        {!activeDiff ? (
-          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--di-ink-mute)", fontSize: 13, gap: 8 }}>
-            <Icon name="git-compare" size={16} />Select a change to review its diff.
+        {loading ? (
+          <div style={{ position: "absolute", top: 60, left: 24, right: 24 }}>
+            {[40, 92, 86, 70, 30, 88, 64].map((w, i) => <div key={i} style={{ width: `${w}%`, height: 12, borderRadius: 6, background: "#12283f", opacity: 0.6, animation: "di-pulse 1.6s infinite", marginBottom: i === 4 ? 26 : 12 }} />)}
+          </div>
+        ) : clean ? (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 40px" }}>
+            <div style={{ maxWidth: 420, textAlign: "center" }}>
+              <div style={{ width: 60, height: 60, margin: "0 auto 18px", borderRadius: 15, background: "#0e2233", border: "1px solid var(--di-rule)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="check-check" size={27} color="var(--di-info)" /></div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: "var(--di-ink)", letterSpacing: "-0.01em", marginBottom: 8 }}>Nothing to review</div>
+              <div style={{ fontSize: 13, color: "var(--di-ink-mute)", lineHeight: 1.55 }}>The working tree matches HEAD. When Claude edits files, they queue here for you to keep, revert, or tighten.</div>
+            </div>
+          </div>
+        ) : !activeDiff ? (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 40px" }}>
+            <div style={{ maxWidth: 420, textAlign: "center" }}>
+              <div style={{ width: 60, height: 60, margin: "0 auto 18px", borderRadius: 15, background: "#0e2233", border: "1px solid var(--di-rule)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="mouse-pointer-click" size={27} color="var(--di-info)" /></div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: "var(--di-ink)", letterSpacing: "-0.01em", marginBottom: 8 }}>Select a file to review</div>
+              <div style={{ fontSize: 13, color: "var(--di-ink-mute)", lineHeight: 1.55 }}>Pick a change from the list to read its diff, then keep, revert, or ask Claude to tighten it.</div>
+            </div>
           </div>
         ) : (
           <div className="di-scroll di-mono" style={{ flex: 1, fontSize: 12.5, lineHeight: 1.8, padding: "46px 0 20px" }}>
