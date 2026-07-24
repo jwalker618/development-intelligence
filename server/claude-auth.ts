@@ -29,7 +29,8 @@ export interface AuthStatus {
 
 const ANSI_RE =
   /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|[\x00-\x08\x0b-\x1f\x7f]/g;
-const TOKEN_RE = /sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,}/;
+// setup-token mints `sk-ant-oat01-…`; stay tolerant of format drift (any sk-ant-…).
+const TOKEN_RE = /sk-ant-[A-Za-z0-9_-]{24,}/;
 const URL_RE = /https:\/\/[^\s"'<>]+/g;
 // OSC-8 hyperlink: ESC ] 8 ; <params> ; <URL> (ST = BEL or ESC \). The URL here
 // is the true, un-wrapped target — the CLI often renders an elided display text
@@ -173,9 +174,16 @@ export class ClaudeAuth {
     }
 
     const token = text.match(TOKEN_RE);
-    if (token && this.state !== "done") {
-      writeClaudeToken(this.cfg, token[0]);
-      this.state = "done";
+    if (token && this.state !== "done" && this.state !== "error") {
+      // Persist inside a guard: a write failure here (e.g. read-only volume)
+      // must surface as an error, not silently hang the flow in "verifying".
+      try {
+        writeClaudeToken(this.cfg, token[0]);
+        this.state = "done";
+      } catch (e) {
+        this.state = "error";
+        this.detail = `signed in, but couldn't save the token: ${e instanceof Error ? e.message : String(e)}`;
+      }
       // Let the CLI finish its own teardown, then reap it.
       setTimeout(() => this.stopPty(), 1500);
     }
