@@ -103,7 +103,7 @@ function Workbench({
         onCloseSession={setCloseTarget}
         screen={
           <>
-            {view === "session" && <SessionScreen s={state} chat={chat} cavemanSavings={cavemanSavings} sample={sample} claudeConnected={claudeConnected} onConnect={onConnect} onCaveman={actions.setCaveman} onSend={actions.sendMessage} onApproval={actions.resolveApproval} onInterrupt={actions.interrupt} onModel={actions.setModel} onAddPin={actions.addPin} onRemovePin={actions.removePin} onSearch={actions.search} />}
+            {view === "session" && <SessionScreen s={state} chat={chat} cavemanSavings={cavemanSavings} sample={sample} claudeConnected={claudeConnected} onConnect={onConnect} onCaveman={actions.setCaveman} onSend={actions.sendMessage} onApproval={actions.resolveApproval} onInterrupt={actions.interrupt} onModel={actions.setModel} onEffort={actions.setEffort} onAddPin={actions.addPin} onRemovePin={actions.removePin} onSearch={actions.search} />}
             {view === "changes" && <ChangesScreen s={state} activeDiff={activeDiff} sample={sample} loading={conn === "loading"} onSelect={actions.selectChange} onVerdict={actions.setVerdict} onReviewed={actions.markReviewed} onCommitSync={actions.commitSync} />}
             {view === "files" && <FilesScreen tree={tree} sessionId={sessionId} />}
             {view === "preview" && <PreviewScreen s={state} sample={sample} onViewport={() => undefined} onSendToAgent={() => changeView("session")} />}

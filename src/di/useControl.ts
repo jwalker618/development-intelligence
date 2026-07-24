@@ -31,6 +31,7 @@ export interface Actions {
   resolveApproval: (id: string, decision: "allow" | "always" | "deny") => void;
   interrupt: () => void;
   setModel: (model: string) => void;
+  setEffort: (effort: string | null) => void;
   addPin: (icon: string, label: string) => void;
   removePin: (id: string) => void;
   search: (q: string) => Promise<SearchHit[]>;
@@ -44,7 +45,7 @@ const is401 = (e: unknown) => e instanceof Error && /\b401\b/.test(e.message);
 export function useControl(sessionId: string | null): Live {
   const [state, setState] = useState<SessionState>(seedState);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [chat, setChat] = useState<ChatState>({ messages: [], busy: false, model: null, pendingApprovalId: null });
+  const [chat, setChat] = useState<ChatState>({ messages: [], busy: false, model: null, effort: null, pendingApprovalId: null });
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [activeDiff, setActiveDiff] = useState<{ path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null>(null);
   const [cavemanSavings, setCavemanSavings] = useState<string | null>(null);
@@ -138,6 +139,7 @@ export function useControl(sessionId: string | null): Live {
     resolveApproval: (id, decision) => { if (sessionId) void api.chatApproval(sessionId, id, decision).catch(guard); },
     interrupt: () => { if (sessionId) void api.chatInterrupt(sessionId).catch(guard); },
     setModel: (model) => { if (sessionId) { setChat((c) => ({ ...c, model })); void api.chatModel(sessionId, model).catch(guard); } },
+    setEffort: (effort) => { if (sessionId) { setChat((c) => ({ ...c, effort })); void api.chatEffort(sessionId, effort).catch(guard); } },
     addPin: (icon, label) => {
       if (!sessionId || !label.trim()) return;
       void api.addPin(sessionId, icon, label).then(({ pin }) => {
