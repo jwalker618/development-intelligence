@@ -122,7 +122,10 @@ async function preflight() {
   else add("bad", "Master token (GROTTO_TOKEN)", "NOT set — server generated a random token", "You cannot know a generated token → login will 401. Set GROTTO_TOKEN in Railway to a value you choose, redeploy, then use it here.");
   add(d.homeWritable ? "ok" : "bad", "Volume writable", d.homeWritable ? "yes — " + (d.home || "") : "NO — cannot write to " + (d.home || "volume"), d.homeWritable ? "" : "Credentials/token can't persist. Check the volume mount + GROTTO_HOME.");
   add(d.mfaEnabled ? "warn" : "ok", "MFA", d.mfaEnabled ? "enabled — a 6-digit code is required" : "disabled");
-  add(d.claudeTokenPresent ? "ok" : "warn", "Claude token", d.claudeTokenPresent ? "stored" : "not stored yet — connect Claude or paste a token", d.claudeTokenPresent ? "" : "Login still works without it; needed only for chat.");
+  if (!d.claudeTokenPresent) add("warn", "Claude token", "not stored yet — connect Claude or paste a token", "Login still works without it; needed only for chat.");
+  else if (d.claudeTokenKind === "apikey") add("ok", "Claude token", "API key stored — " + (d.claudeTokenPreview || ""), "Sent as ANTHROPIC_API_KEY. If step 4 still 401s, the key is invalid or its org is inactive/unfunded.");
+  else if (d.claudeTokenKind === "oauth") add("ok", "Claude token", "OAuth setup-token stored — " + (d.claudeTokenPreview || ""), "Sent as an OAuth bearer. If step 4 401s ('Invalid bearer token'), re-mint with claude setup-token (needs a Pro/Max plan).");
+  else add("bad", "Claude token", "unrecognised value stored — " + (d.claudeTokenPreview || ""), "Not an sk-ant-oat… or sk-ant-api… token. Clear it and paste a real setup-token or API key.");
   add("ok", "Active credentials", String(d.activeLogins != null ? d.activeLogins : "?"));
   add(d.gitTokenSet ? "ok" : "warn", "Git token", d.gitTokenSet ? "set" : "not set — repo clone/push limited");
   $("preflight").innerHTML = rows.join("");

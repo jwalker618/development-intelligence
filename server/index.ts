@@ -8,6 +8,7 @@ import { cavemanStatus, setCavemanMode } from "./caveman.js";
 import { ClaudeAuth } from "./claude-auth.js";
 import { doctor, repair } from "./doctor.js";
 import {
+  claudeTokenInfo,
   clearClaudeToken,
   gitEnv,
   loadConfig,
@@ -67,13 +68,16 @@ router.on("GET", "/api/preflight", () => {
   } catch {
     homeWritable = false;
   }
+  const ct = claudeTokenInfo(cfg);
   return {
     ok: true,
     tokenSource: cfg.tokenSource,
     mfaEnabled: mfa.enabled(),
     home: cfg.home,
     homeWritable,
-    claudeTokenPresent: !!readClaudeToken(cfg),
+    claudeTokenPresent: ct.present,
+    claudeTokenKind: ct.kind,
+    claudeTokenPreview: ct.preview,
     activeLogins: logins.count(),
     gitTokenSet: !!cfg.gitToken,
     node: process.version,
