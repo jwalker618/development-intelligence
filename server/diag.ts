@@ -73,7 +73,38 @@ export const DIAG_HTML = `<!doctype html>
   </div>
 
   <div class="card">
-    <h2>4 · Confirm Claude auth</h2>
+    <h2>4 · Claude token — create or paste</h2>
+    <div class="muted">Get a token that bills your Claude <b>subscription</b> — you do NOT need to buy an API key. Two ways:</div>
+
+    <label>A · Paste a token you already have</label>
+    <div class="muted" style="margin-bottom:6px">From <code>claude setup-token</code> (<code>sk-ant-oat…</code>, subscription) — or an API key (<code>sk-ant-api…</code>, pay-as-you-go).</div>
+    <input id="ctok" type="password" placeholder="sk-ant-oat01-…" autocomplete="off" />
+    <div class="btns">
+      <button class="btn" onclick="storeToken()">Store token</button>
+      <button class="btn secondary" onclick="clearClaudeToken()">Clear stored Claude token</button>
+    </div>
+    <div class="banner" id="ctok-banner"></div>
+
+    <hr style="border:0;border-top:1px solid #14212f;margin:18px 0" />
+
+    <label>B · Run the guided sign-in here (mints a subscription token)</label>
+    <div class="btns"><button class="btn secondary" id="as-btn" onclick="authStart()">Start guided sign-in</button></div>
+    <div id="auth-flow" style="display:none;margin-top:12px">
+      <div class="muted">1) Open this URL, sign in with your Claude subscription, and authorise:</div>
+      <input id="auth-url" readonly style="margin-top:6px" />
+      <div class="btns">
+        <button class="btn secondary" onclick="copyAuthUrl()">Copy URL</button>
+        <button class="btn secondary" onclick="openAuthUrl()">Open URL</button>
+      </div>
+      <label>2) Paste the code claude.ai gives you</label>
+      <input id="auth-code" placeholder="paste code" autocomplete="off" />
+      <div class="btns"><button class="btn" id="ac-btn" onclick="authCode()">Submit code</button></div>
+    </div>
+    <div class="banner" id="auth-banner"></div>
+  </div>
+
+  <div class="card">
+    <h2>5 · Confirm Claude auth</h2>
     <div class="muted">Runs a tiny real request through the agent's exact auth path (~10–25s). A pass here means chat will authenticate.</div>
     <div class="btns"><button class="btn" id="cv-btn" onclick="verifyClaude()">Test Claude auth</button></div>
     <div class="banner" id="cv-banner"></div>
@@ -179,6 +210,66 @@ async function verifyClaude() {
 }
 
 function clearCred() { try { localStorage.removeItem(CRED_KEY); localStorage.removeItem("grotto-token"); } catch {} banner("login-banner", true, "Stored credential cleared."); log("cleared stored credential"); }
+
+async function storeToken() {
+  if (!cred()) { banner("ctok-banner", false, "Log in first (step 2)."); return; }
+  const t = $("ctok").value.trim();
+  if (!t) { banner("ctok-banner", false, "Paste a token first."); return; }
+  if (!/^sk-ant-/.test(t)) banner("ctok-banner", false, "Warning: that doesn't start with sk-ant- — storing anyway.");
+  let r;
+  try { r = await call("/api/claude-token", { method: "PUT", auth: true, body: JSON.stringify({ token: t }) }); }
+  catch (e) { banner("ctok-banner", false, "Network error: " + (e.message || e)); return; }
+  if (r.ok) { $("ctok").value = ""; banner("ctok-banner", true, "Token stored. Re-running preflight; then run step 5 to verify."); preflight(); }
+  else banner("ctok-banner", false, "Store failed — HTTP " + r.status + ": " + ((r.data && r.data.error) || "unknown"));
+}
+
+async function clearClaudeToken() {
+  if (!cred()) { banner("ctok-banner", false, "Log in first (step 2)."); return; }
+  try { await call("/api/claude-token", { method: "DELETE", auth: true }); banner("ctok-banner", true, "Claude token cleared."); preflight(); }
+  catch (e) { banner("ctok-banner", false, "Network error: " + (e.message || e)); }
+}
+
+let authPoll = null;
+async function authStart() {
+  if (!cred()) { banner("auth-banner", false, "Log in first (step 2)."); return; }
+  const btn = $("as-btn"); btn.disabled = true;
+  try {
+    let r;
+    try { r = await call("/api/claude-auth/start", { method: "POST", auth: true }); }
+    catch (e) { banner("auth-banner", false, "Network error: " + (e.message || e)); return; }
+    if (!r.ok) { banner("auth-banner", false, "Could not start — HTTP " + r.status + ": " + ((r.data && r.data.error) || "unknown")); return; }
+    $("auth-flow").style.display = "block";
+    banner("auth-banner", true, "Starting… the sign-in link will appear below in a few seconds.");
+    if (authPoll) clearInterval(authPoll);
+    authPoll = setInterval(pollAuth, 1500);
+    pollAuth();
+  } finally { btn.disabled = false; }
+}
+async function pollAuth() {
+  let r;
+  try { r = await call("/api/claude-auth", { auth: true }); } catch { return; }
+  const d = r.data || {};
+  if (d.url) $("auth-url").value = d.url;
+  if (d.state === "done") { clearInterval(authPoll); banner("auth-banner", true, "Signed in — subscription token stored. Run step 5 to verify."); preflight(); }
+  else if (d.state === "error") { clearInterval(authPoll); banner("auth-banner", false, "Sign-in failed: " + (d.detail || "unknown") + (d.tail ? " · " + d.tail.slice(-200) : "")); }
+  else if (d.state === "verifying") banner("auth-banner", true, "Verifying your code…");
+  else if (d.url) banner("auth-banner", true, "Open the URL, authorise, then paste the code and submit.");
+}
+async function authCode() {
+  const code = $("auth-code").value.trim();
+  if (!code) { banner("auth-banner", false, "Paste the code first."); return; }
+  const btn = $("ac-btn"); btn.disabled = true;
+  try {
+    let r;
+    try { r = await call("/api/claude-auth/code", { method: "POST", auth: true, body: JSON.stringify({ code: code }) }); }
+    catch (e) { banner("auth-banner", false, "Network error: " + (e.message || e)); return; }
+    if (!r.ok) { banner("auth-banner", false, "Submit failed — HTTP " + r.status + ": " + ((r.data && r.data.error) || "unknown")); return; }
+    banner("auth-banner", true, "Code submitted — verifying…");
+    if (!authPoll) { authPoll = setInterval(pollAuth, 1500); }
+  } finally { btn.disabled = false; }
+}
+function copyAuthUrl() { const v = $("auth-url").value; if (!v) return; try { navigator.clipboard.writeText(v); log("copied auth URL"); } catch { $("auth-url").select(); document.execCommand("copy"); } }
+function openAuthUrl() { const v = $("auth-url").value; if (v) window.open(v, "_blank", "noopener"); }
 
 preflight();
 </script>
