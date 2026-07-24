@@ -200,6 +200,12 @@ export class Logins {
     return this.entries.some((e) => e.expiresAt > now && safeEq(e.hash, h));
   }
 
+  /** Count of currently-valid (unexpired) device credentials. */
+  count(): number {
+    const now = Date.now();
+    return this.entries.filter((e) => e.expiresAt > now).length;
+  }
+
   revoke(credential: string): void {
     const h = this.hash(credential);
     this.entries = this.entries.filter((e) => !safeEq(e.hash, h));

@@ -9,6 +9,9 @@ export interface GrottoConfig {
   port: number;
   /** Bearer token required on every /api call and WS upgrade. */
   token: string;
+  /** Where `token` came from — "env" (GROTTO_TOKEN set) or "generated" (random,
+   *  written to the volume; the operator can't know it → login always 401s). */
+  tokenSource: "env" | "generated";
   /** GitHub token used for clone/push. Never written into remote URLs. */
   gitToken: string | null;
   /** Repos offered in the picker, as "owner/repo". */
@@ -38,19 +41,19 @@ function readFileConfig(home: string): FileConfig {
  * Token resolution: GROTTO_TOKEN env wins; otherwise a token is generated once
  * and persisted to $GROTTO_HOME/token so restarts don't log everyone out.
  */
-function resolveToken(home: string): string {
+function resolveToken(home: string): { token: string; source: "env" | "generated" } {
   const fromEnv = process.env.GROTTO_TOKEN?.trim();
-  if (fromEnv) return fromEnv;
+  if (fromEnv) return { token: fromEnv, source: "env" };
   const tokenPath = path.join(home, "token");
   try {
     const existing = fs.readFileSync(tokenPath, "utf8").trim();
-    if (existing) return existing;
+    if (existing) return { token: existing, source: "generated" };
   } catch {
     /* fall through to generate */
   }
   const token = crypto.randomBytes(24).toString("base64url");
   fs.writeFileSync(tokenPath, token + "\n", { mode: 0o600 });
-  return token;
+  return { token, source: "generated" };
 }
 
 export function loadConfig(): GrottoConfig {
@@ -64,10 +67,12 @@ export function loadConfig(): GrottoConfig {
     .filter(Boolean);
   const repos = [...new Set([...envRepos, ...(file.repos ?? [])])];
 
+  const { token, source } = resolveToken(home);
   return {
     home,
     port: Number(process.env.PORT ?? file.port ?? 4870),
-    token: resolveToken(home),
+    token,
+    tokenSource: source,
     gitToken: process.env.GROTTO_GIT_TOKEN?.trim() || null,
     repos,
     sessionSetup: process.env.GROTTO_SESSION_SETUP ?? file.sessionSetup ?? null,
