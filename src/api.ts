@@ -61,6 +61,23 @@ export interface SpanDiffResponse {
   binary?: boolean;
 }
 
+/** A pinned "keep in context" item (server/pins.ts). */
+export interface PinRecord {
+  id: string;
+  icon: string;
+  label: string;
+  createdAt: number;
+}
+
+/** One transcript-search hit (server/search.ts). */
+export interface SearchHit {
+  seq: number;
+  at: number;
+  kind: string;
+  role: "user" | "agent" | "tool" | "approval" | "system";
+  snippet: string;
+}
+
 /** Structured chat event from the server-side headless Claude Code session. */
 export interface ChatEvent {
   seq: number;
@@ -255,6 +272,20 @@ export const api = {
     req<SpanDiffResponse>(
       `/api/sessions/${id}/git/diff/semantic?path=${encodeURIComponent(path)}`,
     ),
+  searchTranscript: (id: string, q: string) =>
+    req<{ hits: SearchHit[] }>(
+      `/api/sessions/${id}/transcript/search?q=${encodeURIComponent(q)}`,
+    ),
+  pins: (id: string) => req<{ pins: PinRecord[] }>(`/api/sessions/${id}/pins`),
+  addPin: (id: string, icon: string, label: string) =>
+    req<{ pin: PinRecord }>(`/api/sessions/${id}/pins`, {
+      method: "POST",
+      body: JSON.stringify({ icon, label }),
+    }),
+  removePin: (id: string, pinId: string) =>
+    req<{ pins: PinRecord[] }>(`/api/sessions/${id}/pins/${encodeURIComponent(pinId)}`, {
+      method: "DELETE",
+    }),
   chatMessage: (id: string, text: string) =>
     req(`/api/sessions/${id}/chat/message`, {
       method: "POST",

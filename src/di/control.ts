@@ -18,7 +18,7 @@ export const SAMPLE = {
   rtk: true,            // no RTK endpoint yet
   cavemanPercent: true, // server gives a lifetime savings string, not a per-session %
   semanticDiff: false,  // live: token-level span diff + LCS move detection (server/spandiff.ts)
-  pins: true,           // no pin store yet (§9.2)
+  pins: false,          // live: per-session pin store (server/pins.ts)
   tasks: true,          // no task-runner backend yet (§9.3)
   preview: true,        // no preview runtime bridge yet (§9.4)
 } as const;

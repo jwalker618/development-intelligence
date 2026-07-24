@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type SessionInfo } from "../api";
+import { api, type SearchHit, type SessionInfo } from "../api";
 import {
   SAMPLE, buildTree, mapSpanDiff, parseDiff, setCavemanMode, subscribeChat, toChanges, toDialMode, toTimeline,
   type ChatMsg, type ChatState, type Move, type TreeNode,
@@ -31,6 +31,9 @@ export interface Actions {
   resolveApproval: (id: string, decision: "allow" | "always" | "deny") => void;
   interrupt: () => void;
   setModel: (model: string) => void;
+  addPin: (icon: string, label: string) => void;
+  removePin: (id: string) => void;
+  search: (q: string) => Promise<SearchHit[]>;
   refresh: () => void;
 }
 
@@ -56,8 +59,8 @@ export function useControl(sessionId: string | null): Live {
 
   const loadSession = useCallback(async (id: string) => {
     try {
-      const [cav, git, log, treeRes, list] = await Promise.all([
-        api.caveman(), api.gitStatus(id), api.gitLog(id), api.tree(id), api.sessions(),
+      const [cav, git, log, treeRes, list, pinsRes] = await Promise.all([
+        api.caveman(), api.gitStatus(id), api.gitLog(id), api.tree(id), api.sessions(), api.pins(id),
       ]);
       setSessions(list);
       const info = list.find((s) => s.id === id);
@@ -71,6 +74,7 @@ export function useControl(sessionId: string | null): Live {
         caveman: { mode: toDialMode(cav.mode), savedPct: prev.caveman.savedPct },
         timeline: toTimeline(log.entries),
         changes: toChanges(git, reviewed.current, info?.approval ?? null),
+        pins: pinsRes.pins.map((p) => ({ id: p.id, icon: p.icon, label: p.label })),
       }));
     } catch (e) { guard(e); }
   }, [guard]);
@@ -134,6 +138,21 @@ export function useControl(sessionId: string | null): Live {
     resolveApproval: (id, decision) => { if (sessionId) void api.chatApproval(sessionId, id, decision).catch(guard); },
     interrupt: () => { if (sessionId) void api.chatInterrupt(sessionId).catch(guard); },
     setModel: (model) => { if (sessionId) { setChat((c) => ({ ...c, model })); void api.chatModel(sessionId, model).catch(guard); } },
+    addPin: (icon, label) => {
+      if (!sessionId || !label.trim()) return;
+      void api.addPin(sessionId, icon, label).then(({ pin }) => {
+        setState((p) => ({ ...p, pins: [{ id: pin.id, icon: pin.icon, label: pin.label }, ...p.pins] }));
+      }).catch(guard);
+    },
+    removePin: (id) => {
+      if (!sessionId) return;
+      // optimistic — the server returns the new list, which we trust as truth.
+      setState((p) => ({ ...p, pins: p.pins.filter((x) => x.id !== id) }));
+      void api.removePin(sessionId, id).then(({ pins }) => {
+        setState((p) => ({ ...p, pins: pins.map((x) => ({ id: x.id, icon: x.icon, label: x.label })) }));
+      }).catch(guard);
+    },
+    search: (q) => sessionId ? api.searchTranscript(sessionId, q).then((r) => r.hits).catch(() => []) : Promise.resolve([]),
     refresh: () => { if (sessionId) void loadSession(sessionId); },
   };
 
