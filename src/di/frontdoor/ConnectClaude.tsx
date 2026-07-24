@@ -15,6 +15,21 @@ export function ConnectClaude({ onDone, onSkip }: { onDone: () => void; onSkip: 
   const [manual, setManual] = useState(false);
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const copyUrl = async (url: string) => {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(url);
+      else {
+        // Insecure-context / older-webview fallback: select a hidden textarea.
+        const ta = document.createElement("textarea");
+        ta.value = url; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.focus(); ta.select();
+        document.execCommand("copy"); document.body.removeChild(ta);
+      }
+      setCopied(true); setTimeout(() => setCopied(false), 1600);
+    } catch { /* clipboard blocked — the URL is still visible to select manually */ }
+  };
 
   useEffect(() => {
     void api.claudeAuth().then(setStatus).catch(() => setStatus({ state: "idle", url: null, detail: null, tail: "" }));
@@ -88,11 +103,15 @@ export function ConnectClaude({ onDone, onSkip }: { onDone: () => void; onSkip: 
       <AuthCard width={440}>
         <AuthHeader title="Connect Claude" subtitle="Claude Code needs to sign in to your Anthropic account. This runs once." />
         <div style={{ display: "flex", flexDirection: "column", gap: 11, marginBottom: 18 }}>
-          <Step n={1} label="Open this URL and sign in, then authorize">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, height: 38, padding: "0 8px 0 12px", border: "1px solid var(--di-rule)", borderRadius: 9, background: "#0a1c2e" }}>
-              <span className="di-mono" style={{ fontSize: 11.5, color: "#a9bccf", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status?.url ?? "claude.ai/…"}</span>
-              <button className="di-btn" disabled={!status?.url} onClick={() => status?.url && navigator.clipboard?.writeText(status.url)} style={{ height: 26, padding: "0 10px", border: 0, borderRadius: 6, background: "#12283f", color: "var(--di-info)", fontSize: 11, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="lock" size={12} />Copy</button>
-              <button className="di-btn" disabled={!status?.url} onClick={() => status?.url && window.open(status.url, "_blank")} style={{ height: 26, padding: "0 10px", border: 0, borderRadius: 6, background: "var(--di-info)", color: "#062b26", fontSize: 11, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="external-link" size={12} />Open</button>
+          <Step n={1} label={status?.url ? "Open this URL and sign in, then authorize" : "Press Begin to generate your sign-in link"}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 38, padding: "5px 8px 5px 12px", border: "1px solid var(--di-rule)", borderRadius: 9, background: "#0a1c2e" }}>
+              <span className="di-mono" title={status?.url ?? undefined} style={{ fontSize: 11.5, color: status?.url ? "#a9bccf" : "#5a7186", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status?.url ?? "link appears here after Begin"}</span>
+              <button className="di-btn" disabled={!status?.url} onClick={() => status?.url && void copyUrl(status.url)} style={{ height: 26, padding: "0 10px", border: 0, borderRadius: 6, background: "#12283f", color: copied ? "var(--di-pos)" : "var(--di-info)", fontSize: 11, fontWeight: 600, cursor: status?.url ? "pointer" : "default", opacity: status?.url ? 1 : 0.45, display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name={copied ? "check" : "copy"} size={12} />{copied ? "Copied" : "Copy"}</button>
+              {status?.url ? (
+                <a className="di-btn" href={status.url} target="_blank" rel="noreferrer noopener" style={{ height: 26, padding: "0 10px", border: 0, borderRadius: 6, background: "var(--di-info)", color: "#062b26", fontSize: 11, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none" }}><Icon name="external-link" size={12} />Open</a>
+              ) : (
+                <span className="di-btn" aria-disabled style={{ height: 26, padding: "0 10px", border: 0, borderRadius: 6, background: "var(--di-info)", color: "#062b26", fontSize: 11, fontWeight: 600, opacity: 0.45, display: "inline-flex", alignItems: "center", gap: 5 }}><Icon name="external-link" size={12} />Open</span>
+              )}
             </div>
           </Step>
           <Step n={2} label="Paste the code claude.ai gives you">
@@ -161,7 +180,7 @@ function Step({ n, label, children }: { n: number; label: string; children: Reac
   return (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
       <span className="di-mono" style={{ width: 24, height: 24, flex: "0 0 auto", borderRadius: 999, background: "#12283f", border: "1px solid var(--di-rule)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 600, color: "var(--di-info)" }}>{n}</span>
-      <div style={{ flex: 1 }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 12.5, color: "var(--di-ink)", marginBottom: 7 }}>{label}</div>
         {children}
       </div>

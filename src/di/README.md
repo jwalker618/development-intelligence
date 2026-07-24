@@ -69,17 +69,21 @@ token+MFA gate and the 401 recovery surface.
   interactive Allow/Always/Deny card and a working composer
   (`chat/{message,approval,interrupt}`); timeline from `git/log`; model +
   busy/interrupt from the WS; the Caveman KPI shows the real savings suffix.
-- **Changes** — the list is `git/status`; clicking a change loads the real
-  `git/diff` (parsed into hunks); Commit & sync runs `POST …/git {op:"sync"}`.
+  **Pins** are a live per-session store (`GET/POST/DELETE …/pins`, add via the
+  rail's +, unpin via ×). **⌘K search** runs the live transcript search
+  (`…/transcript/search?q=`) over the session's chat log.
+- **Changes** — the list is `git/status`; clicking a change loads the live
+  **semantic span-diff** (`…/git/diff/semantic`, `server/spandiff.ts`):
+  token-level inline replace spans + first-class **Moved** blocks, with a plain
+  `git/diff` fallback for files the span engine can't handle; Commit & sync runs
+  `POST …/git {op:"sync"}`.
 - **Files** — the tree is `…/tree`.
 
 **Still on sample data (no backend yet — see design §9; flagged in-UI with a
 `SAMPLE` chip and centralised in `control.ts` `SAMPLE`):** RTK gain %, the
 caveman *percent* (server gives a lifetime savings string, not a per-session
-%), the **semantic span-diff** engine (line diff only until the
-`document-intelligence` engine is wired — labelled "span engine not wired"),
-**pins**, the **task runner**, and the **preview runtime bridge**. The Files
-inline file view and per-hunk Revert-to-git are also next-phase.
+%), the **task runner**, and the **preview runtime bridge**. The Files
+per-hunk Revert-to-git is also next-phase.
 
 The official Claude Code panel styling in Session is where `anthropic.claude-code`
 docks in the IDE surface; on the PWA it is the control-plane chat (now live).

@@ -59,23 +59,23 @@ Every item here has a **working server endpoint**; none is surfaced in the new s
 | Timeline (git log) | 🟢 LIVE | ticks render… |
 | Timeline ticks — click to jump/checkout | 🟡 COSMETIC | not clickable to any action |
 | Model pill | 🟡 COSMETIC | displays only; no switch (see §A) |
-| "Search this session" field | 🟡 COSMETIC | no transcript search backend (⚫) |
+| "Search this session" (⌘K) | 🟢 LIVE | `GET …/transcript/search?q=` over the chat log (`server/search.ts`) |
 | Caveman KPI "% context saved" | ⚫ NO BACKEND | server gives a lifetime savings *string*, not a % |
 | RTK "+% tokens returned" | ⚫ NO BACKEND | no RTK endpoint — `SAMPLE` |
-| Pins (add/remove) | 🟡 COSMETIC / ⚫ | local-only; no pin store — `SAMPLE` |
+| Pins (add/remove) | 🟢 LIVE | per-session pin store (`server/pins.ts`), `GET/POST/DELETE …/pins` |
 
 ### Changes (35b) — the review hero
 | Control | Status | Note |
 |---|---|---|
 | Change list | 🟢 LIVE | `GET …/git/status` |
 | Pending-approval "Needs you" row | 🟢 LIVE | from `session.approval` |
-| Select change → diff | 🟢 LIVE | `GET …/git/diff` parsed into hunks |
+| Select change → diff | 🟢 LIVE | live **semantic span-diff** (`GET …/git/diff/semantic`), plain `git/diff` fallback |
 | Commit & sync | 🟢 LIVE | `POST …/git {op:"sync"}` |
 | Per-hunk **Keep** | 🟡 COSMETIC | local toggle; no persisted "reviewed" store |
 | Per-hunk **Revert** | 🟡 COSMETIC | **does nothing** — no per-file/hunk git-discard op exists (⚫; only whole-tree `reset` is exposed) |
 | Per-hunk **Tighten** | 🟡 COSMETIC | **does nothing** — should send a "tighten this file" prompt to chat (backend exists, unwired) |
 | Mark-reviewed (✓) | 🟡 COSMETIC | local `Set` only, not persisted |
-| Semantic diff (replace spans, LCS moves) | ⚫ NO BACKEND | git diff is line-only; `document-intelligence` span engine not wired — labelled "span engine not wired" |
+| Semantic diff (replace spans, LCS moves) | 🟢 LIVE | `server/spandiff.ts` — token-level inline ops + first-class Moved blocks; labelled "span diff · token-level" |
 
 ### Files (35c)
 | Control | Status | Note |
@@ -129,11 +129,11 @@ Every item here has a **working server endpoint**; none is surfaced in the new s
 10. **File create/folder/upload/edit** → wire to the existing endpoints.
 
 ### Phase 3 — build the missing backends (real engineering, not wiring)
-11. **Task runner** server (provisioning cache, guided auth, secret store + redaction, reconnect-safe streaming, `run_task` MCP) — then wire screen 35e.
-12. **Semantic span-diff** engine (`document-intelligence`) → replace the line diff.
-13. **RTK savings** + per-session **caveman %** endpoints → replace the two sample KPIs.
-14. **Preview runtime bridge** (capture console/network errors → agent task).
-15. **Pins store** + **transcript search** endpoints.
+11. **Task runner** server (provisioning cache, guided auth, secret store + redaction, reconnect-safe streaming, `run_task` MCP) — then wire screen 35e. *(still open)*
+12. ✅ **Semantic span-diff** engine — **built** as `server/spandiff.ts` (self-contained line+token LCS with move detection; the `document-intelligence` repo is the DSI product, not a diff engine, so this is in-repo). Wired into Changes.
+13. **RTK savings** + per-session **caveman %** endpoints → replace the two sample KPIs. *(no honest data source yet — caveman exposes a lifetime savings string, RTK has no stats endpoint; left as `SAMPLE` rather than fabricated.)*
+14. **Preview runtime bridge** (capture console/network errors → agent task). *(still open)*
+15. ✅ **Pins store** (`server/pins.ts`) + **transcript search** (`server/search.ts`) — **built** and wired into Session (rail pins + ⌘K).
 
 ---
 

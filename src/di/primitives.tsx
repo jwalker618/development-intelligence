@@ -7,7 +7,7 @@ import {
   Search, Settings, ShieldAlert, Signal, Smartphone, SquareArrowOutDownRight, SquareTerminal, Tablet,
   Terminal, Upload, Wifi, X,
   Sparkles, Download, Save, MousePointerClick, MonitorOff, CheckCheck, FileImage, Image, File, FolderOpen,
-  Pause, Square, Flame, MinusCircle, type LucideIcon,
+  Pause, Square, Flame, MinusCircle, User, Shield, Copy, type LucideIcon,
 } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 
@@ -32,6 +32,7 @@ const ICONS: Record<string, LucideIcon> = {
   sparkles: Sparkles, download: Download, save: Save, "mouse-pointer-click": MousePointerClick,
   "monitor-off": MonitorOff, "check-check": CheckCheck, "file-image": FileImage, image: Image,
   file: File, "folder-open": FolderOpen, pause: Pause, square: Square, flame: Flame, "minus-circle": MinusCircle,
+  user: User, shield: Shield, copy: Copy,
 };
 
 /** Lucide icon by kebab-case name (the design references names verbatim). */

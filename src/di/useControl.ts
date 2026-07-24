@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type SessionInfo } from "../api";
+import { api, type SearchHit, type SessionInfo } from "../api";
 import {
-  SAMPLE, buildTree, parseDiff, setCavemanMode, subscribeChat, toChanges, toDialMode, toTimeline,
-  type ChatMsg, type ChatState, type TreeNode,
+  SAMPLE, buildTree, mapSpanDiff, parseDiff, setCavemanMode, subscribeChat, toChanges, toDialMode, toTimeline,
+  type ChatMsg, type ChatState, type Move, type TreeNode,
 } from "./control";
 import { seedState, type CavemanMode, type Hunk, type SessionState, type Verdict } from "./state";
 
@@ -13,7 +13,7 @@ export interface Live {
   sessions: SessionInfo[];
   chat: ChatState;
   tree: TreeNode | null;
-  activeDiff: { path: string; hunks: Hunk[] } | null;
+  activeDiff: { path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null;
   cavemanSavings: string | null;
   sample: typeof SAMPLE;
   conn: Conn;
@@ -31,6 +31,9 @@ export interface Actions {
   resolveApproval: (id: string, decision: "allow" | "always" | "deny") => void;
   interrupt: () => void;
   setModel: (model: string) => void;
+  addPin: (icon: string, label: string) => void;
+  removePin: (id: string) => void;
+  search: (q: string) => Promise<SearchHit[]>;
   refresh: () => void;
 }
 
@@ -43,7 +46,7 @@ export function useControl(sessionId: string | null): Live {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [chat, setChat] = useState<ChatState>({ messages: [], busy: false, model: null, pendingApprovalId: null });
   const [tree, setTree] = useState<TreeNode | null>(null);
-  const [activeDiff, setActiveDiff] = useState<{ path: string; hunks: Hunk[] } | null>(null);
+  const [activeDiff, setActiveDiff] = useState<{ path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null>(null);
   const [cavemanSavings, setCavemanSavings] = useState<string | null>(null);
   const [conn, setConn] = useState<Conn>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -56,8 +59,8 @@ export function useControl(sessionId: string | null): Live {
 
   const loadSession = useCallback(async (id: string) => {
     try {
-      const [cav, git, log, treeRes, list] = await Promise.all([
-        api.caveman(), api.gitStatus(id), api.gitLog(id), api.tree(id), api.sessions(),
+      const [cav, git, log, treeRes, list, pinsRes] = await Promise.all([
+        api.caveman(), api.gitStatus(id), api.gitLog(id), api.tree(id), api.sessions(), api.pins(id),
       ]);
       setSessions(list);
       const info = list.find((s) => s.id === id);
@@ -71,6 +74,7 @@ export function useControl(sessionId: string | null): Live {
         caveman: { mode: toDialMode(cav.mode), savedPct: prev.caveman.savedPct },
         timeline: toTimeline(log.entries),
         changes: toChanges(git, reviewed.current, info?.approval ?? null),
+        pins: pinsRes.pins.map((p) => ({ id: p.id, icon: p.icon, label: p.label })),
       }));
     } catch (e) { guard(e); }
   }, [guard]);
@@ -116,13 +120,39 @@ export function useControl(sessionId: string | null): Live {
       })();
     },
     commitSync: () => { if (sessionId) void api.gitOp(sessionId, { op: "sync" }).then(() => loadSession(sessionId)).catch(guard); },
-    selectChange: (path) => { if (sessionId) void api.gitDiff(sessionId, path).then(({ diff }) => setActiveDiff({ path, hunks: parseDiff(diff) })).catch(guard); },
+    selectChange: (path) => {
+      if (!sessionId) return;
+      void api.gitDiffSemantic(sessionId, path)
+        .then((res) => { const m = mapSpanDiff(res); setActiveDiff({ path, ...m }); })
+        // Fall back to the plain line diff if the semantic engine errors on this file.
+        .catch((e) => {
+          if (is401(e)) { setConn("reauth"); return; }
+          void api.gitDiff(sessionId, path)
+            .then(({ diff }) => setActiveDiff({ path, hunks: parseDiff(diff), moves: [], truncated: false, binary: false }))
+            .catch(guard);
+        });
+    },
     markReviewed: (path) => { reviewed.current.add(path); setState((p) => ({ ...p, changes: p.changes.map((c) => c.path === path ? { ...c, reviewed: true } : c) })); },
     setVerdict: (path, hunk, v) => setActiveDiff((d) => d && d.path === path ? { ...d, hunks: d.hunks.map((h, i) => i === hunk ? { ...h, verdict: h.verdict === v ? null : v } : h) } : d),
     sendMessage: (text) => { if (sessionId && text.trim()) void api.chatMessage(sessionId, text).catch(guard); },
     resolveApproval: (id, decision) => { if (sessionId) void api.chatApproval(sessionId, id, decision).catch(guard); },
     interrupt: () => { if (sessionId) void api.chatInterrupt(sessionId).catch(guard); },
     setModel: (model) => { if (sessionId) { setChat((c) => ({ ...c, model })); void api.chatModel(sessionId, model).catch(guard); } },
+    addPin: (icon, label) => {
+      if (!sessionId || !label.trim()) return;
+      void api.addPin(sessionId, icon, label).then(({ pin }) => {
+        setState((p) => ({ ...p, pins: [{ id: pin.id, icon: pin.icon, label: pin.label }, ...p.pins] }));
+      }).catch(guard);
+    },
+    removePin: (id) => {
+      if (!sessionId) return;
+      // optimistic — the server returns the new list, which we trust as truth.
+      setState((p) => ({ ...p, pins: p.pins.filter((x) => x.id !== id) }));
+      void api.removePin(sessionId, id).then(({ pins }) => {
+        setState((p) => ({ ...p, pins: pins.map((x) => ({ id: x.id, icon: x.icon, label: x.label })) }));
+      }).catch(guard);
+    },
+    search: (q) => sessionId ? api.searchTranscript(sessionId, q).then((r) => r.hits).catch(() => []) : Promise.resolve([]),
     refresh: () => { if (sessionId) void loadSession(sessionId); },
   };
 

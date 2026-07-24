@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Icon, RailTitle } from "../primitives";
 import { RailScroll, RailDock, MainColumn } from "../Shell";
 import type { ChatState } from "../control";
 import type { SAMPLE } from "../control";
+import type { SearchHit } from "../../api";
 import type { CavemanMode, SessionState } from "../state";
 
 const MODES: CavemanMode[] = ["off", "lite", "full", "ultra"];
@@ -16,7 +17,7 @@ const MODELS = [
 ];
 
 export function SessionScreen({
-  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, onModel,
+  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, onModel, onAddPin, onRemovePin, onSearch,
 }: {
   s: SessionState;
   chat: ChatState;
@@ -29,9 +30,24 @@ export function SessionScreen({
   onApproval: (id: string, d: "allow" | "always" | "deny") => void;
   onInterrupt: () => void;
   onModel: (m: string) => void;
+  onAddPin: (icon: string, label: string) => void;
+  onRemovePin: (id: string) => void;
+  onSearch: (q: string) => Promise<SearchHit[]>;
 }) {
-  const [pins, setPins] = useState(s.pins);
+  const pins = s.pins;
   const [modelMenu, setModelMenu] = useState(false);
+  const [pinDraft, setPinDraft] = useState("");
+  const [addingPin, setAddingPin] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  // ⌘K / Ctrl-K opens transcript search.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); setSearchOpen(true); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   return (
     <>
       {/* ── rail ── */}
@@ -79,12 +95,31 @@ export function SessionScreen({
 
         <div className="di-eyebrow" style={{ marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
           Pinned · {pins.length}{sample.pins && <SampleChip />}
+          <button className="di-btn" onClick={() => setAddingPin((v) => !v)} aria-label="Add pin" title="Add pin"
+            style={{ marginLeft: "auto", border: 0, background: "transparent", cursor: "pointer", padding: 0, display: "flex" }}>
+            <Icon name={addingPin ? "x" : "plus"} size={13} color="var(--di-ink-mute)" />
+          </button>
         </div>
+        {addingPin && (
+          <form
+            onSubmit={(e) => { e.preventDefault(); const v = pinDraft.trim(); if (v) { onAddPin("pin", v); setPinDraft(""); setAddingPin(false); } }}
+            style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+            <input autoFocus value={pinDraft} onChange={(e) => setPinDraft(e.target.value)} placeholder="Keep in context…"
+              style={{ flex: 1, minWidth: 0, height: 32, padding: "0 10px", border: "1px solid #6a4a1a", borderRadius: 9, background: "#1a1206", color: "#e9dcc8", fontFamily: "inherit", fontSize: 11.5, outline: "none" }} />
+            <button className="di-btn" type="submit" aria-label="Save pin"
+              style={{ flex: "0 0 auto", width: 32, height: 32, border: 0, borderRadius: 9, background: "var(--di-warn)", color: "#1a1206", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Icon name="check" size={14} color="#1a1206" />
+            </button>
+          </form>
+        )}
+        {pins.length === 0 && !addingPin && (
+          <div style={{ fontSize: 11, color: "#6f8296", padding: "2px 2px 4px", lineHeight: 1.5 }}>Nothing pinned. Pin a decision or command to keep it in context.</div>
+        )}
         {pins.map((p) => (
           <div key={p.id} className="di-btn" style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", border: "1px solid #6a4a1a", borderRadius: 10, background: "#1a1206", marginBottom: 7 }}>
             <Icon name={p.icon} size={13} color="var(--di-warn)" />
             <span style={{ fontSize: 11.5, color: "#e9dcc8", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.label}</span>
-            <button className="di-btn" onClick={() => setPins((ps) => ps.filter((x) => x.id !== p.id))} aria-label={`Unpin ${p.label}`} style={{ border: 0, background: "transparent", cursor: "pointer", padding: 0, display: "flex" }}>
+            <button className="di-btn" onClick={() => onRemovePin(p.id)} aria-label={`Unpin ${p.label}`} style={{ border: 0, background: "transparent", cursor: "pointer", padding: 0, display: "flex" }}>
               <Icon name="x" size={12} color="var(--di-ink-mute)" />
             </button>
           </div>
@@ -92,12 +127,14 @@ export function SessionScreen({
       </RailScroll>
 
       <RailDock style={{ background: "var(--di-panel-alt)", borderTop: "1px solid #16273a" }}>
-        <div className="di-row di-btn" style={{ display: "flex", alignItems: "center", gap: 8, height: 38, padding: "0 12px", border: "1px solid var(--di-rule)", borderRadius: 10, background: "var(--di-surface-sunken)", cursor: "pointer" }}>
+        <button className="di-row di-btn" onClick={() => setSearchOpen(true)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, height: 38, padding: "0 12px", border: "1px solid var(--di-rule)", borderRadius: 10, background: "var(--di-surface-sunken)", cursor: "pointer", fontFamily: "inherit" }}>
           <Icon name="search" size={15} color="var(--di-ink-mute)" />
-          <span style={{ fontSize: 12, color: "#6f8296", flex: 1 }}>Search this session…</span>
+          <span style={{ fontSize: 12, color: "#6f8296", flex: 1, textAlign: "left" }}>Search this session…</span>
           <span className="di-mono" style={{ fontSize: 10, color: "#6f8296" }}>⌘K</span>
-        </div>
+        </button>
       </RailDock>
+
+      {searchOpen && <SearchOverlay onSearch={onSearch} onClose={() => setSearchOpen(false)} />}
 
       {/* ── main: the agent conversation (live) ── */}
       <MainColumn style={{ background: "var(--cc-bg)" }}>
@@ -260,6 +297,73 @@ function KpiTile({ eyebrow, value, unit, valueColor, border, bg, eyebrowColor, s
       <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
         <span className="di-mono" style={{ fontSize: 19, fontWeight: 600, color: valueColor, letterSpacing: "-0.01em" }}>{value}</span>
         <span style={{ fontSize: 9, color: "#6f8296" }}>{unit}</span>
+      </div>
+    </div>
+  );
+}
+
+const ROLE_META: Record<SearchHit["role"], { icon: string; color: string; label: string }> = {
+  user: { icon: "user", color: "var(--di-spot)", label: "you" },
+  agent: { icon: "asterisk", color: "var(--di-info)", label: "Claude" },
+  tool: { icon: "terminal", color: "var(--di-warn)", label: "tool" },
+  approval: { icon: "shield", color: "var(--di-warn)", label: "approval" },
+  system: { icon: "alert-triangle", color: "var(--di-neg)", label: "system" },
+};
+
+/** ⌘K transcript search — live against /api/sessions/:id/transcript/search. */
+function SearchOverlay({ onSearch, onClose }: { onSearch: (q: string) => Promise<SearchHit[]>; onClose: () => void }) {
+  const [q, setQ] = useState("");
+  const [hits, setHits] = useState<SearchHit[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [ran, setRan] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Debounce the query so we don't hit the endpoint on every keystroke.
+  useEffect(() => {
+    const term = q.trim();
+    if (!term) { setHits([]); setRan(false); return; }
+    setBusy(true);
+    const t = setTimeout(() => {
+      void onSearch(term).then((h) => { setHits(h); setRan(true); }).finally(() => setBusy(false));
+    }, 200);
+    return () => clearTimeout(t);
+  }, [q, onSearch]);
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(4,10,18,.62)", backdropFilter: "blur(2px)", display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: "12vh" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: 560, maxWidth: "92vw", maxHeight: "70vh", display: "flex", flexDirection: "column", border: "1px solid var(--di-rule)", borderRadius: 14, background: "var(--di-surface)", boxShadow: "0 24px 64px rgba(0,0,0,.5)", overflow: "hidden" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 16px", borderBottom: "1px solid var(--di-rule)" }}>
+          <Icon name="search" size={16} color="var(--di-ink-mute)" />
+          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search this session's transcript…"
+            style={{ flex: 1, background: "transparent", border: 0, outline: "none", color: "var(--di-ink)", fontFamily: "inherit", fontSize: 13.5 }} />
+          {busy && <Icon name="loader" size={14} color="var(--di-ink-mute)" />}
+          <span className="di-mono" style={{ fontSize: 10, color: "#6f8296" }}>esc</span>
+        </div>
+        <div className="di-scroll" style={{ overflowY: "auto" }}>
+          {ran && hits.length === 0 && (
+            <div style={{ padding: "22px 18px", fontSize: 12.5, color: "var(--di-ink-mute)", textAlign: "center" }}>No matches in this session's transcript.</div>
+          )}
+          {!ran && !q.trim() && (
+            <div style={{ padding: "22px 18px", fontSize: 12, color: "#6f8296", textAlign: "center", lineHeight: 1.6 }}>Search everything Claude and you have said, plus tool calls and approvals.</div>
+          )}
+          {hits.map((h, i) => {
+            const r = ROLE_META[h.role];
+            return (
+              <div key={`${h.seq}-${i}`} style={{ display: "flex", gap: 10, padding: "10px 16px", borderTop: i ? "1px solid var(--di-rule)" : 0 }}>
+                <Icon name={r.icon} size={13} color={r.color} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 9, letterSpacing: ".06em", textTransform: "uppercase", color: r.color, marginBottom: 3 }}>{r.label}</div>
+                  <div style={{ fontSize: 12, color: "var(--di-ink-soft)", lineHeight: 1.5, wordBreak: "break-word" }}>{h.snippet}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
