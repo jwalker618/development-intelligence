@@ -73,7 +73,9 @@ export class ClaudeAuth {
       state: this.state,
       url: this.url,
       detail: this.detail,
-      tail: this.buffer.replace(ANSI_RE, "").replace(new RegExp(TOKEN_RE, "g"), "sk-ant-•••").slice(-600),
+      // Wider window so a stalled verify shows what setup-token actually printed
+      // (incl. a token our matcher may not recognise, so the operator can copy it).
+      tail: this.buffer.replace(ANSI_RE, "").slice(-2500),
     };
   }
 

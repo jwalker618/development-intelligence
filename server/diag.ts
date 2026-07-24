@@ -76,9 +76,13 @@ export const DIAG_HTML = `<!doctype html>
     <h2>4 · Claude token — create or paste</h2>
     <div class="muted">Get a token that bills your Claude <b>subscription</b> — you do NOT need to buy an API key. Two ways:</div>
 
-    <label>A · Paste a token you already have</label>
-    <div class="muted" style="margin-bottom:6px">From <code>claude setup-token</code> (<code>sk-ant-oat…</code>, subscription) — or an API key (<code>sk-ant-api…</code>, pay-as-you-go).</div>
-    <input id="ctok" type="password" placeholder="sk-ant-oat01-…" autocomplete="off" />
+    <label>A · Paste a token you already have <span class="muted">(recommended)</span></label>
+    <div class="muted" style="margin-bottom:6px">
+      On your OWN computer run <code>claude setup-token</code>, authorise in the browser, paste the code it asks for, and it prints a
+      <b>token starting <code>sk-ant-oat01-</code> (~108 chars)</b> — paste THAT here. Not the short code from the browser.
+      (An API key <code>sk-ant-api…</code> also works, pay-as-you-go.)
+    </div>
+    <input id="ctok" type="password" placeholder="sk-ant-oat01-… (~108 chars)" autocomplete="off" />
     <div class="btns">
       <button class="btn" onclick="storeToken()">Store token</button>
       <button class="btn secondary" onclick="clearClaudeToken()">Clear stored Claude token</button>
@@ -87,7 +91,8 @@ export const DIAG_HTML = `<!doctype html>
 
     <hr style="border:0;border-top:1px solid #14212f;margin:18px 0" />
 
-    <label>B · Run the guided sign-in here (mints a subscription token)</label>
+    <label>B · Run the guided sign-in here <span class="muted">(only works if THIS server can reach platform.claude.com)</span></label>
+    <div class="muted" style="margin-bottom:6px">If it gets stuck on "verifying", the server can't complete the token exchange (blocked egress) — use section A instead.</div>
     <div class="btns"><button class="btn secondary" id="as-btn" onclick="authStart()">Start guided sign-in</button></div>
     <div id="auth-flow" style="display:none;margin-top:12px">
       <div class="muted">1) Open this URL, sign in with your Claude subscription, and authorise:</div>
@@ -98,7 +103,13 @@ export const DIAG_HTML = `<!doctype html>
       </div>
       <label>2) Paste the code claude.ai gives you</label>
       <input id="auth-code" placeholder="paste code" autocomplete="off" />
-      <div class="btns"><button class="btn" id="ac-btn" onclick="authCode()">Submit code</button></div>
+      <div class="btns">
+        <button class="btn" id="ac-btn" onclick="authCode()">Submit code</button>
+        <button class="btn secondary" onclick="authCancel()">Cancel / reset</button>
+      </div>
+      <label style="margin-top:12px">Live CLI output <span class="muted">(what <code>claude setup-token</code> is actually doing)</span></label>
+      <pre id="auth-tail" style="max-height:200px">—</pre>
+      <div class="muted" id="auth-tail-hint" style="margin-top:6px"></div>
     </div>
     <div class="banner" id="auth-banner"></div>
   </div>
@@ -215,7 +226,14 @@ async function storeToken() {
   if (!cred()) { banner("ctok-banner", false, "Log in first (step 2)."); return; }
   const t = $("ctok").value.trim();
   if (!t) { banner("ctok-banner", false, "Paste a token first."); return; }
-  if (!/^sk-ant-/.test(t)) banner("ctok-banner", false, "Warning: that doesn't start with sk-ant- — storing anyway.");
+  if (!/^sk-ant-/.test(t)) {
+    banner("ctok-banner", false, "That doesn't look like a token — it's probably the authorization CODE from the browser. The TOKEN is what claude setup-token prints AFTER you paste the code: it starts with sk-ant-oat01- and is ~108 characters. Paste that instead. (Not stored.)");
+    return;
+  }
+  if (/^sk-ant-oat/.test(t) && t.length < 90) {
+    banner("ctok-banner", false, "That sk-ant-oat token looks too short (" + t.length + " chars; expected ~108) — likely truncated on copy. Re-copy the whole line. (Not stored.)");
+    return;
+  }
   let r;
   try { r = await call("/api/claude-token", { method: "PUT", auth: true, body: JSON.stringify({ token: t }) }); }
   catch (e) { banner("ctok-banner", false, "Network error: " + (e.message || e)); return; }
@@ -245,15 +263,28 @@ async function authStart() {
     pollAuth();
   } finally { btn.disabled = false; }
 }
+let verifyTicks = 0;
 async function pollAuth() {
   let r;
   try { r = await call("/api/claude-auth", { auth: true }); } catch { return; }
   const d = r.data || {};
   if (d.url) $("auth-url").value = d.url;
-  if (d.state === "done") { clearInterval(authPoll); banner("auth-banner", true, "Signed in — subscription token stored. Run step 5 to verify."); preflight(); }
-  else if (d.state === "error") { clearInterval(authPoll); banner("auth-banner", false, "Sign-in failed: " + (d.detail || "unknown") + (d.tail ? " · " + d.tail.slice(-200) : "")); }
-  else if (d.state === "verifying") banner("auth-banner", true, "Verifying your code…");
+  if (typeof d.tail === "string") $("auth-tail").textContent = d.tail || "—";
+  if (d.state === "done") { clearInterval(authPoll); authPoll = null; verifyTicks = 0; banner("auth-banner", true, "Signed in — subscription token stored. Run step 5 to verify."); $("auth-tail-hint").textContent = ""; preflight(); }
+  else if (d.state === "error") { clearInterval(authPoll); authPoll = null; verifyTicks = 0; banner("auth-banner", false, "Sign-in failed: " + (d.detail || "unknown")); }
+  else if (d.state === "verifying") {
+    verifyTicks++;
+    banner("auth-banner", true, "Verifying your code… (" + verifyTicks + ")");
+    if (verifyTicks >= 12) $("auth-tail-hint").innerHTML = "Stuck verifying. Read the output above: <b>if you can see the token</b> (a long value after the code), copy it into the paste box in section A. <b>If it just sits there</b>, the code exchange is blocked (likely network egress on the server) — run <code>claude setup-token</code> on your own machine instead and paste the result.";
+  }
   else if (d.url) banner("auth-banner", true, "Open the URL, authorise, then paste the code and submit.");
+}
+async function authCancel() {
+  if (authPoll) { clearInterval(authPoll); authPoll = null; }
+  verifyTicks = 0;
+  try { await call("/api/claude-auth/cancel", { method: "POST", auth: true }); } catch {}
+  $("auth-flow").style.display = "none"; $("auth-tail").textContent = "—"; $("auth-tail-hint").textContent = "";
+  banner("auth-banner", true, "Reset. Start again, or use the paste box in section A.");
 }
 async function authCode() {
   const code = $("auth-code").value.trim();
