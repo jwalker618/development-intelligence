@@ -91,18 +91,18 @@ export const DIAG_HTML = `<!doctype html>
 
     <hr style="border:0;border-top:1px solid #14212f;margin:18px 0" />
 
-    <label>B · Run the guided sign-in here <span class="muted">(only works if THIS server can reach platform.claude.com)</span></label>
-    <div class="muted" style="margin-bottom:6px">If it gets stuck on "verifying", the server can't complete the token exchange (blocked egress) — use section A instead.</div>
+    <label>B · Sign in here (no CLI needed)</label>
+    <div class="muted" style="margin-bottom:6px">Start → open the link → authorise with your Claude subscription → Claude shows a code → come back to this page and paste it. The server swaps the code for the token for you. <b>Leaving this page is fine</b> — when you return, the code box below reappears automatically.</div>
     <div class="btns"><button class="btn secondary" id="as-btn" onclick="authStart()">Start guided sign-in</button></div>
     <div id="auth-flow" style="display:none;margin-top:12px">
-      <div class="muted">1) Open this URL, sign in with your Claude subscription, and authorise:</div>
+      <div class="muted">1) Open this URL (new tab), sign in with your Claude subscription, and authorise:</div>
       <input id="auth-url" readonly style="margin-top:6px" />
       <div class="btns">
         <button class="btn secondary" onclick="copyAuthUrl()">Copy URL</button>
         <button class="btn secondary" onclick="openAuthUrl()">Open URL</button>
       </div>
-      <label>2) Paste the code claude.ai gives you</label>
-      <input id="auth-code" placeholder="paste code" autocomplete="off" />
+      <label>2) Paste the code Claude gives you, then Submit — this is the swap step (code → token)</label>
+      <input id="auth-code" placeholder="paste the authorization code here" autocomplete="off" />
       <div class="btns">
         <button class="btn" id="ac-btn" onclick="authCode()">Submit code</button>
         <button class="btn secondary" onclick="authCancel()">Cancel / reset</button>
@@ -194,6 +194,7 @@ async function doLogin() {
     const exp = r.data.expiresAt ? new Date(r.data.expiresAt).toLocaleString() : "?";
     banner("login-banner", true, "Logged in. Credential stored (expires " + exp + "). Now run step 3 to confirm.");
     whoami();
+    resumeAuth();
   } finally { btn.disabled = false; }
 }
 
@@ -302,6 +303,26 @@ async function authCode() {
 function copyAuthUrl() { const v = $("auth-url").value; if (!v) return; try { navigator.clipboard.writeText(v); log("copied auth URL"); } catch { $("auth-url").select(); document.execCommand("copy"); } }
 function openAuthUrl() { const v = $("auth-url").value; if (v) window.open(v, "_blank", "noopener"); }
 
+// Phone flow: opening the sign-in link navigates away and reloads /diag. The
+// server still holds the pending sign-in, so on load we re-show the code box
+// (and its URL) ready for the code — that's the "nowhere to put it" fix.
+async function resumeAuth() {
+  if (!cred()) return;
+  let r;
+  try { r = await call("/api/claude-auth", { auth: true }); } catch { return; }
+  const d = r.data || {};
+  if (d.state === "awaiting-code" || d.state === "verifying") {
+    if (d.url) $("auth-url").value = d.url;
+    $("auth-flow").style.display = "block";
+    if (typeof d.tail === "string") $("auth-tail").textContent = d.tail || "—";
+    banner("auth-banner", true, d.state === "verifying"
+      ? "A sign-in is verifying — waiting for the token…"
+      : "Sign-in in progress — paste the code Claude gave you into the box below and press Submit code.");
+    if (!authPoll) authPoll = setInterval(pollAuth, 1500);
+  }
+}
+
 preflight();
+resumeAuth();
 </script>
 </body></html>`;
