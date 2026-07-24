@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type SessionInfo } from "../api";
 import {
-  SAMPLE, buildTree, parseDiff, setCavemanMode, subscribeChat, toChanges, toDialMode, toTimeline,
-  type ChatMsg, type ChatState, type TreeNode,
+  SAMPLE, buildTree, mapSpanDiff, parseDiff, setCavemanMode, subscribeChat, toChanges, toDialMode, toTimeline,
+  type ChatMsg, type ChatState, type Move, type TreeNode,
 } from "./control";
 import { seedState, type CavemanMode, type Hunk, type SessionState, type Verdict } from "./state";
 
@@ -13,7 +13,7 @@ export interface Live {
   sessions: SessionInfo[];
   chat: ChatState;
   tree: TreeNode | null;
-  activeDiff: { path: string; hunks: Hunk[] } | null;
+  activeDiff: { path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null;
   cavemanSavings: string | null;
   sample: typeof SAMPLE;
   conn: Conn;
@@ -43,7 +43,7 @@ export function useControl(sessionId: string | null): Live {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [chat, setChat] = useState<ChatState>({ messages: [], busy: false, model: null, pendingApprovalId: null });
   const [tree, setTree] = useState<TreeNode | null>(null);
-  const [activeDiff, setActiveDiff] = useState<{ path: string; hunks: Hunk[] } | null>(null);
+  const [activeDiff, setActiveDiff] = useState<{ path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null>(null);
   const [cavemanSavings, setCavemanSavings] = useState<string | null>(null);
   const [conn, setConn] = useState<Conn>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -116,7 +116,18 @@ export function useControl(sessionId: string | null): Live {
       })();
     },
     commitSync: () => { if (sessionId) void api.gitOp(sessionId, { op: "sync" }).then(() => loadSession(sessionId)).catch(guard); },
-    selectChange: (path) => { if (sessionId) void api.gitDiff(sessionId, path).then(({ diff }) => setActiveDiff({ path, hunks: parseDiff(diff) })).catch(guard); },
+    selectChange: (path) => {
+      if (!sessionId) return;
+      void api.gitDiffSemantic(sessionId, path)
+        .then((res) => { const m = mapSpanDiff(res); setActiveDiff({ path, ...m }); })
+        // Fall back to the plain line diff if the semantic engine errors on this file.
+        .catch((e) => {
+          if (is401(e)) { setConn("reauth"); return; }
+          void api.gitDiff(sessionId, path)
+            .then(({ diff }) => setActiveDiff({ path, hunks: parseDiff(diff), moves: [], truncated: false, binary: false }))
+            .catch(guard);
+        });
+    },
     markReviewed: (path) => { reviewed.current.add(path); setState((p) => ({ ...p, changes: p.changes.map((c) => c.path === path ? { ...c, reviewed: true } : c) })); },
     setVerdict: (path, hunk, v) => setActiveDiff((d) => d && d.path === path ? { ...d, hunks: d.hunks.map((h, i) => i === hunk ? { ...h, verdict: h.verdict === v ? null : v } : h) } : d),
     sendMessage: (text) => { if (sessionId && text.trim()) void api.chatMessage(sessionId, text).catch(guard); },

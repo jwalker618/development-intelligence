@@ -42,6 +42,25 @@ export interface GitLogEntry {
   when: string;
 }
 
+/** Semantic span-diff (server/spandiff.ts): token-level inline ops + move blocks. */
+export interface SpanOp { kind: "equal" | "insert" | "delete"; text: string }
+export interface SpanLine {
+  no: number | null;
+  kind: "context" | "add" | "del" | "replace";
+  text?: string;
+  ops?: SpanOp[];
+}
+export interface SpanHunk { header: string; lines: SpanLine[] }
+export interface SpanMove { count: number; text: string; toLine: number }
+export interface SpanDiffResponse {
+  hunks?: SpanHunk[];
+  moves?: SpanMove[];
+  add?: number;
+  del?: number;
+  truncated?: boolean;
+  binary?: boolean;
+}
+
 /** Structured chat event from the server-side headless Claude Code session. */
 export interface ChatEvent {
   seq: number;
@@ -231,6 +250,10 @@ export const api = {
   gitDiff: (id: string, path?: string) =>
     req<{ diff: string }>(
       `/api/sessions/${id}/git/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`,
+    ),
+  gitDiffSemantic: (id: string, path: string) =>
+    req<SpanDiffResponse>(
+      `/api/sessions/${id}/git/diff/semantic?path=${encodeURIComponent(path)}`,
     ),
   chatMessage: (id: string, text: string) =>
     req(`/api/sessions/${id}/chat/message`, {

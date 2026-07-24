@@ -7,7 +7,7 @@
  * runtime bridge — is flagged in `SAMPLE` and stays on seed data (honest until
  * those endpoints exist; see the design handoff §9 open questions). */
 
-import { api, chatUrl, getToken, type CavemanStatus, type GitStatus } from "../api";
+import { api, chatUrl, getToken, type CavemanStatus, type GitStatus, type SpanDiffResponse } from "../api";
 import type {
   CavemanMode, Change, DiffLine, Hunk, Pin, SessionState, TimelineTick,
 } from "./state";
@@ -17,7 +17,7 @@ import { seedState } from "./state";
 export const SAMPLE = {
   rtk: true,            // no RTK endpoint yet
   cavemanPercent: true, // server gives a lifetime savings string, not a per-session %
-  semanticDiff: true,   // document-intelligence span engine not wired — line diff only
+  semanticDiff: false,  // live: token-level span diff + LCS move detection (server/spandiff.ts)
   pins: true,           // no pin store yet (§9.2)
   tasks: true,          // no task-runner backend yet (§9.3)
   preview: true,        // no preview runtime bridge yet (§9.4)
@@ -126,6 +126,36 @@ export function parseDiff(diff: string): Hunk[] {
   // Cap each hunk so a giant diff can't blow the panel.
   for (const h of hunks) if (h.lines.length > 60) h.lines = h.lines.slice(0, 60);
   return hunks;
+}
+
+// ── semantic span diff (server/spandiff.ts) → hunks + move blocks ─────────────
+
+/** A run of lines moved (deleted here, re-inserted unchanged elsewhere). */
+export interface Move { count: number; text: string; toLine: number }
+
+/** Map the server SpanDiff into the client Hunk[] + moves the review hero renders. */
+export function mapSpanDiff(res: SpanDiffResponse): { hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } {
+  if (res.binary) return { hunks: [], moves: [], truncated: false, binary: true };
+  const hunks: Hunk[] = (res.hunks ?? []).map((h) => ({
+    header: h.header,
+    verdict: null,
+    lines: h.lines.map((l): DiffLine => {
+      if (l.kind === "replace") {
+        return {
+          no: l.no,
+          kind: "replace",
+          ops: (l.ops ?? []).map((op) =>
+            op.kind === "delete" ? { kind: "delete" as const, oldText: op.text }
+              : op.kind === "insert" ? { kind: "insert" as const, newText: op.text }
+                : { kind: "equal" as const, text: op.text }),
+        };
+      }
+      return { no: l.no, kind: l.kind, text: l.text };
+    }),
+  }));
+  // Cap each hunk so a giant diff can't blow the panel (parity with parseDiff).
+  for (const h of hunks) if (h.lines.length > 60) h.lines = h.lines.slice(0, 60);
+  return { hunks, moves: res.moves ?? [], truncated: !!res.truncated, binary: false };
 }
 
 // ── flat path list → a nested file tree ────────────────────────────────────────

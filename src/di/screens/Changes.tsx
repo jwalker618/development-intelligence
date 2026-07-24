@@ -1,14 +1,13 @@
 import { Icon, RailTitle } from "../primitives";
 import { RailDock, MainColumn } from "../Shell";
-import { SampleChip } from "./Session";
-import type { SAMPLE } from "../control";
+import type { SAMPLE, Move } from "../control";
 import type { Change, Hunk, SessionState, Verdict } from "../state";
 
 export function ChangesScreen({
-  s, activeDiff, sample, loading, onSelect, onVerdict, onReviewed, onCommitSync,
+  s, activeDiff, loading, onSelect, onVerdict, onReviewed, onCommitSync,
 }: {
   s: SessionState;
-  activeDiff: { path: string; hunks: Hunk[] } | null;
+  activeDiff: { path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null;
   sample: typeof SAMPLE;
   loading?: boolean;
   onSelect: (path: string) => void;
@@ -68,9 +67,10 @@ export function ChangesScreen({
             <span style={{ fontSize: 11, color: "var(--di-neg)" }}>−{totals.del}</span>
           </div>
         )}
-        {sample.semanticDiff && activeDiff && (
+        {activeDiff && (
           <div style={{ position: "absolute", top: 15, left: 20, zIndex: 6, display: "inline-flex", alignItems: "center", gap: 6, fontSize: 10, color: "var(--di-ink-mute)" }}>
-            line diff <SampleChip /> <span style={{ color: "#4d6076" }}>span engine not wired</span>
+            <Icon name="git-compare" size={11} color="var(--di-info)" />
+            {activeDiff.truncated ? "line diff · file too large for spans" : "span diff · token-level"}
           </div>
         )}
 
@@ -96,7 +96,8 @@ export function ChangesScreen({
           </div>
         ) : (
           <div className="di-scroll di-mono" style={{ flex: 1, fontSize: 12.5, lineHeight: 1.8, padding: "46px 0 20px" }}>
-            {activeDiff.hunks.length === 0 && <div style={{ padding: "0 20px", color: "var(--di-ink-mute)" }}>No textual diff (new, binary, or unchanged).</div>}
+            {activeDiff.moves.length > 0 && <MoveBlock moves={activeDiff.moves} />}
+            {activeDiff.hunks.length === 0 && activeDiff.moves.length === 0 && <div style={{ padding: "0 20px", color: "var(--di-ink-mute)" }}>No textual diff (new, binary, or unchanged).</div>}
             {activeDiff.hunks.map((h, i) => <HunkView key={i} h={h} onVerdict={(v) => onVerdict(activeDiff.path, i, v)} />)}
           </div>
         )}
@@ -177,6 +178,24 @@ function HunkView({ h, onVerdict }: { h: Hunk; onVerdict: (v: Verdict) => void }
         <VerdictBtn onClick={() => onVerdict("tighten")} icon="sparkles" label="Tighten" style={{ background: h.verdict === "tighten" ? "var(--di-rail-hue)" : "var(--di-rail-row-bg)", color: h.verdict === "tighten" ? "#0a1420" : "var(--di-rail-title)", border: "1px solid var(--di-rail-row-border)" }} />
       </div>
     </>
+  );
+}
+
+/** Moved runs — the flagship: reported once here, not as +N/−N noise in the hunks. */
+function MoveBlock({ moves }: { moves: Move[] }) {
+  return (
+    <div style={{ margin: "0 20px 18px", border: "1px solid var(--di-rule)", borderRadius: 10, background: "#101d2e", overflow: "hidden" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: "var(--di-surface-sunken)", color: "var(--di-info)", fontSize: 11, letterSpacing: ".03em" }}>
+        <Icon name="move" size={13} color="var(--di-info)" />
+        Moved · {moves.length} block{moves.length === 1 ? "" : "s"}
+      </div>
+      {moves.map((m, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "baseline", gap: 10, padding: "6px 12px", borderTop: "1px solid var(--di-rule)" }}>
+          <span style={{ flex: "0 0 auto", fontSize: 10, color: "var(--di-ink-mute)" }}>→ line {m.toLine}{m.count > 1 ? ` (+${m.count - 1})` : ""}</span>
+          <span style={{ color: "var(--di-ink-soft)", whiteSpace: "pre", overflow: "hidden", textOverflow: "ellipsis" }}>{m.text}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 

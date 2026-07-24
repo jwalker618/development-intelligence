@@ -30,6 +30,7 @@ import { createGithubRepo, listGithubRepos } from "./github.js";
 import { HttpError, Router, sendJson, serveStatic } from "./http.js";
 import { proxyHttp, proxyUpgrade } from "./proxy.js";
 import { SessionManager } from "./sessions.js";
+import { semanticDiff } from "./spandiff.js";
 
 const cfg = loadConfig();
 preseedClaudeConfig(cfg); // no onboarding TUI, ever — see config.ts
@@ -354,6 +355,30 @@ router.on("GET", "/api/sessions/:id/git/diff", async ({ params, query }) => {
     r = await runGit(dir, ["diff", "--no-index", "--", "/dev/null", p], gitEnv(cfg));
   }
   return { diff: r.stdout };
+});
+
+/**
+ * Semantic span diff — the review-hero engine. `old` = HEAD:path (empty for an
+ * untracked/new file), `new` = working-tree content. Returns token-level inline
+ * ops + move blocks (see server/spandiff.ts), not a raw unified-diff string.
+ */
+router.on("GET", "/api/sessions/:id/git/diff/semantic", async ({ params, query }) => {
+  const dir = manager.get(params.id).dir;
+  const p = query.get("path");
+  if (!p) throw new HttpError(400, "path required");
+  // Old side: HEAD:path. A new/untracked file has no HEAD blob → empty.
+  const head = await runGit(dir, ["show", `HEAD:${p}`], gitEnv(cfg));
+  const oldText = head.code === 0 ? head.stdout : "";
+  // New side: the working-tree file. A deleted file reads as missing → empty.
+  let newText = "";
+  try {
+    const f = readFile(dir, p);
+    if (f.binary) return { binary: true, path: p };
+    newText = f.content;
+  } catch {
+    newText = "";
+  }
+  return semanticDiff(oldText, newText);
 });
 
 /** Deterministic commit message for one-tap Sync — no tokens spent. */
