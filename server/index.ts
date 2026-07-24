@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { WebSocketServer } from "ws";
@@ -25,6 +26,8 @@ import {
   writeFile,
   writeFileRaw,
 } from "./files.js";
+import { verifyClaude } from "./claude-verify.js";
+import { DIAG_HTML } from "./diag.js";
 import { assertOk, parseStatus, runGit, type GitResult } from "./git.js";
 import { createGithubRepo, listGithubRepos } from "./github.js";
 import { HttpError, Router, sendJson, serveStatic } from "./http.js";
@@ -49,6 +52,42 @@ const webRoot = path.resolve(import.meta.dirname, "../dist/web");
 // ── API ─────────────────────────────────────────────────────────────────────
 
 router.on("GET", "/api/health", () => ({ ok: true }));
+
+// ── auth diagnostics (see /diag) ─────────────────────────────────────────────
+
+/** Unauthenticated preflight: everything the operator needs to see WHY login
+ *  might fail, without ever leaking the token itself. */
+router.on("GET", "/api/preflight", () => {
+  let homeWritable = false;
+  try {
+    const probe = path.join(cfg.home, ".diag-write-probe");
+    fs.writeFileSync(probe, "ok");
+    fs.rmSync(probe, { force: true });
+    homeWritable = true;
+  } catch {
+    homeWritable = false;
+  }
+  return {
+    ok: true,
+    tokenSource: cfg.tokenSource,
+    mfaEnabled: mfa.enabled(),
+    home: cfg.home,
+    homeWritable,
+    claudeTokenPresent: !!readClaudeToken(cfg),
+    activeLogins: logins.count(),
+    gitTokenSet: !!cfg.gitToken,
+    node: process.version,
+  };
+});
+
+/** Authenticated: reaching this handler means the credential passed the gate. */
+router.on("GET", "/api/whoami", ({ req, query }) => {
+  const cred = authorized(req, query);
+  return { ok: true, via: cred && safeEq(cred, cfg.token) ? "master token" : "device credential" };
+});
+
+/** Authenticated: run a real, tiny request through the agent's auth path. */
+router.on("GET", "/api/claude/verify", async () => verifyClaude(cfg));
 
 // ── login: exchange master token (+ TOTP code when MFA is on) for a 30-day
 //    revocable device credential. The master token never lives on the phone. ─
@@ -606,6 +645,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname.startsWith("/api/")) {
     const open =
       url.pathname === "/api/health" ||
+      url.pathname === "/api/preflight" ||
       (url.pathname === "/api/login" && req.method === "POST");
     if (!open && !authorized(req, url.searchParams)) {
       sendJson(res, 401, { error: "unauthorized" });
@@ -613,6 +653,13 @@ const server = http.createServer(async (req, res) => {
     }
     const handled = await router.handle(req, res);
     if (!handled) sendJson(res, 404, { error: "not found" });
+    return;
+  }
+
+  // Standalone auth console — no auth, no React app, always available.
+  if (url.pathname === "/diag" || url.pathname === "/diag.html") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    res.end(DIAG_HTML);
     return;
   }
 
