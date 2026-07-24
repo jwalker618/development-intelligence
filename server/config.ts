@@ -133,18 +133,38 @@ export function clearClaudeToken(cfg: GrottoConfig): void {
   fs.rmSync(claudeTokenPath(cfg), { force: true });
 }
 
+/** Classify a stored Claude credential so we inject it under the RIGHT env var.
+ *  A setup-token (`sk-ant-oat…`) is an OAuth bearer; an API key (`sk-ant-api…`)
+ *  is NOT a bearer and 401s ("Invalid bearer token") if sent as one. */
+export function claudeTokenKind(token: string): "oauth" | "apikey" | "other" {
+  if (/^sk-ant-oat/i.test(token)) return "oauth";
+  if (/^sk-ant-api/i.test(token)) return "apikey";
+  return "other";
+}
+
+/** Redacted view of the stored Claude credential for diagnostics (never full). */
+export function claudeTokenInfo(cfg: GrottoConfig): {
+  present: boolean;
+  kind: "oauth" | "apikey" | "other" | null;
+  preview: string | null;
+} {
+  const t = readClaudeToken(cfg);
+  if (!t) return { present: false, kind: null, preview: null };
+  return { present: true, kind: claudeTokenKind(t), preview: `${t.slice(0, 14)}…(${t.length} chars)` };
+}
+
 /** Full environment for session processes (PTY, setup): git auth + agent auth. */
 export function sessionEnv(cfg: GrottoConfig): NodeJS.ProcessEnv {
   const env = gitEnv(cfg);
   const token = readClaudeToken(cfg);
   if (token) {
-    env.CLAUDE_CODE_OAUTH_TOKEN = token;
-    // The subscription token is authoritative. A stray ANTHROPIC_API_KEY in the
-    // host env (a very common Railway setting) would otherwise put the CLI in
-    // API-key mode and shadow the OAuth token — the classic "auth failed" even
-    // though a valid setup-token is present. Remove it so OAuth wins.
+    // Route by token type. Whichever we set, clear the others so a stray host
+    // ANTHROPIC_API_KEY can't shadow (or an OAuth token can't be sent as a key).
     delete env.ANTHROPIC_API_KEY;
     delete env.ANTHROPIC_AUTH_TOKEN;
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    if (claudeTokenKind(token) === "apikey") env.ANTHROPIC_API_KEY = token;
+    else env.CLAUDE_CODE_OAUTH_TOKEN = token; // oauth (or unknown → try as bearer)
   }
   return env;
 }
