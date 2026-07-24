@@ -6,7 +6,6 @@ import { LoginThrottle, Logins, Mfa, safeEq } from "./auth.js";
 import { AgentChats } from "./agent.js";
 import { cavemanStatus, setCavemanMode } from "./caveman.js";
 import { ClaudeAuth } from "./claude-auth.js";
-import { ClaudeOAuth } from "./claude-oauth.js";
 import { doctor, repair } from "./doctor.js";
 import {
   claudeTokenInfo,
@@ -44,7 +43,6 @@ preseedClaudeConfig(cfg); // no onboarding TUI, ever — see config.ts
 const manager = new SessionManager(cfg);
 const chats = new AgentChats(cfg);
 const claudeAuth = new ClaudeAuth(cfg);
-const claudeOAuth = new ClaudeOAuth(cfg);
 const mfa = new Mfa(cfg);
 const pins = new Pins(cfg);
 const logins = new Logins(cfg);
@@ -237,14 +235,6 @@ router.on("POST", "/api/claude-auth/code", ({ body }) => {
 });
 
 router.on("POST", "/api/claude-auth/cancel", () => claudeAuth.cancel());
-
-// Direct OAuth (PKCE) — deterministic code→token exchange, no PTY.
-router.on("POST", "/api/claude-oauth/start", () => claudeOAuth.start());
-router.on("POST", "/api/claude-oauth/exchange", async ({ body }) => {
-  const b = (body ?? {}) as { code?: string };
-  if (!b.code?.trim()) throw new HttpError(400, "code required");
-  return claudeOAuth.exchange(b.code);
-});
 
 router.on("GET", "/api/sessions", () =>
   manager.list().map((s) => {

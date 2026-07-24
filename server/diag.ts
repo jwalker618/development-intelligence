@@ -91,21 +91,25 @@ export const DIAG_HTML = `<!doctype html>
 
     <hr style="border:0;border-top:1px solid #14212f;margin:18px 0" />
 
-    <label>B · Sign in here to mint a subscription token <span class="muted">(no CLI needed)</span></label>
-    <div class="muted" style="margin-bottom:6px">Three steps: get a link → authorise in your browser → paste the code Claude shows you. The server swaps the code for the token directly.</div>
-    <div class="btns"><button class="btn secondary" id="as-btn" onclick="oauthStart()">1 · Get sign-in link</button></div>
+    <label>B · Run the guided sign-in here <span class="muted">(only works if THIS server can reach platform.claude.com)</span></label>
+    <div class="muted" style="margin-bottom:6px">If it gets stuck on "verifying", the server can't complete the token exchange (blocked egress) — use section A instead.</div>
+    <div class="btns"><button class="btn secondary" id="as-btn" onclick="authStart()">Start guided sign-in</button></div>
     <div id="auth-flow" style="display:none;margin-top:12px">
-      <div class="muted">2) Open this URL, sign in with your Claude <b>subscription</b>, authorise, and copy the code it shows:</div>
+      <div class="muted">1) Open this URL, sign in with your Claude subscription, and authorise:</div>
       <input id="auth-url" readonly style="margin-top:6px" />
       <div class="btns">
         <button class="btn secondary" onclick="copyAuthUrl()">Copy URL</button>
         <button class="btn secondary" onclick="openAuthUrl()">Open URL</button>
       </div>
-      <label>3) Paste the code Claude gives you (it may look like <code>xxxx#yyyy</code> — paste the whole thing)</label>
-      <input id="auth-code" placeholder="paste authorization code" autocomplete="off" />
+      <label>2) Paste the code claude.ai gives you</label>
+      <input id="auth-code" placeholder="paste code" autocomplete="off" />
       <div class="btns">
-        <button class="btn" id="ac-btn" onclick="oauthExchange()">Exchange for token</button>
+        <button class="btn" id="ac-btn" onclick="authCode()">Submit code</button>
+        <button class="btn secondary" onclick="authCancel()">Cancel / reset</button>
       </div>
+      <label style="margin-top:12px">Live CLI output <span class="muted">(what <code>claude setup-token</code> is actually doing)</span></label>
+      <pre id="auth-tail" style="max-height:200px">—</pre>
+      <div class="muted" id="auth-tail-hint" style="margin-top:6px"></div>
     </div>
     <div class="banner" id="auth-banner"></div>
   </div>
@@ -243,29 +247,56 @@ async function clearClaudeToken() {
   catch (e) { banner("ctok-banner", false, "Network error: " + (e.message || e)); }
 }
 
-async function oauthStart() {
+let authPoll = null;
+async function authStart() {
   if (!cred()) { banner("auth-banner", false, "Log in first (step 2)."); return; }
   const btn = $("as-btn"); btn.disabled = true;
   try {
     let r;
-    try { r = await call("/api/claude-oauth/start", { method: "POST", auth: true }); }
+    try { r = await call("/api/claude-auth/start", { method: "POST", auth: true }); }
     catch (e) { banner("auth-banner", false, "Network error: " + (e.message || e)); return; }
-    if (!r.ok || !r.data.url) { banner("auth-banner", false, "Could not start — HTTP " + r.status + ": " + ((r.data && r.data.error) || "unknown")); return; }
-    $("auth-url").value = r.data.url;
+    if (!r.ok) { banner("auth-banner", false, "Could not start — HTTP " + r.status + ": " + ((r.data && r.data.error) || "unknown")); return; }
     $("auth-flow").style.display = "block";
-    banner("auth-banner", true, "Open the URL, authorise with your subscription, then paste the code below and Exchange.");
+    banner("auth-banner", true, "Starting… the sign-in link will appear below in a few seconds.");
+    if (authPoll) clearInterval(authPoll);
+    authPoll = setInterval(pollAuth, 1500);
+    pollAuth();
   } finally { btn.disabled = false; }
 }
-async function oauthExchange() {
+let verifyTicks = 0;
+async function pollAuth() {
+  let r;
+  try { r = await call("/api/claude-auth", { auth: true }); } catch { return; }
+  const d = r.data || {};
+  if (d.url) $("auth-url").value = d.url;
+  if (typeof d.tail === "string") $("auth-tail").textContent = d.tail || "—";
+  if (d.state === "done") { clearInterval(authPoll); authPoll = null; verifyTicks = 0; banner("auth-banner", true, "Signed in — subscription token stored. Run step 5 to verify."); $("auth-tail-hint").textContent = ""; preflight(); }
+  else if (d.state === "error") { clearInterval(authPoll); authPoll = null; verifyTicks = 0; banner("auth-banner", false, "Sign-in failed: " + (d.detail || "unknown")); }
+  else if (d.state === "verifying") {
+    verifyTicks++;
+    banner("auth-banner", true, "Verifying your code… (" + verifyTicks + ")");
+    if (verifyTicks >= 12) $("auth-tail-hint").innerHTML = "Stuck verifying. Read the output above: <b>if you can see the token</b> (a long value after the code), copy it into the paste box in section A. <b>If it just sits there</b>, the code exchange is blocked (likely network egress on the server) — run <code>claude setup-token</code> on your own machine instead and paste the result.";
+  }
+  else if (d.url) banner("auth-banner", true, "Open the URL, authorise, then paste the code and submit.");
+}
+async function authCancel() {
+  if (authPoll) { clearInterval(authPoll); authPoll = null; }
+  verifyTicks = 0;
+  try { await call("/api/claude-auth/cancel", { method: "POST", auth: true }); } catch {}
+  $("auth-flow").style.display = "none"; $("auth-tail").textContent = "—"; $("auth-tail-hint").textContent = "";
+  banner("auth-banner", true, "Reset. Start again, or use the paste box in section A.");
+}
+async function authCode() {
   const code = $("auth-code").value.trim();
   if (!code) { banner("auth-banner", false, "Paste the code first."); return; }
-  const btn = $("ac-btn"); btn.disabled = true; banner("auth-banner", true, "Exchanging code for token…");
+  const btn = $("ac-btn"); btn.disabled = true;
   try {
     let r;
-    try { r = await call("/api/claude-oauth/exchange", { method: "POST", auth: true, body: JSON.stringify({ code: code }) }); }
+    try { r = await call("/api/claude-auth/code", { method: "POST", auth: true, body: JSON.stringify({ code: code }) }); }
     catch (e) { banner("auth-banner", false, "Network error: " + (e.message || e)); return; }
-    if (r.ok && r.data.ok) { $("auth-code").value = ""; banner("auth-banner", true, (r.data.detail || "Token stored.") + " Run step 5 to verify."); preflight(); }
-    else banner("auth-banner", false, (r.data && (r.data.detail || r.data.error)) || ("HTTP " + r.status));
+    if (!r.ok) { banner("auth-banner", false, "Submit failed — HTTP " + r.status + ": " + ((r.data && r.data.error) || "unknown")); return; }
+    banner("auth-banner", true, "Code submitted — verifying…");
+    if (!authPoll) { authPoll = setInterval(pollAuth, 1500); }
   } finally { btn.disabled = false; }
 }
 function copyAuthUrl() { const v = $("auth-url").value; if (!v) return; try { navigator.clipboard.writeText(v); log("copied auth URL"); } catch { $("auth-url").select(); document.execCommand("copy"); } }
