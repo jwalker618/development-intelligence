@@ -1,11 +1,13 @@
 import {
-  AlertOctagon, AlertTriangle, ArrowUp, Asterisk, AtSign, BatteryFull, Check, CheckCircle2,
-  ChevronDown, ChevronRight, Circle, CornerUpLeft, Database, DatabaseZap, ExternalLink,
+  AlertOctagon, AlertTriangle, ArrowUp, ArrowUpLeft, Asterisk, AtSign, BatteryFull, Check, CheckCircle2,
+  ChevronDown, ChevronRight, Circle, CornerUpLeft, Database, DatabaseZap, ExternalLink, Eye, EyeOff,
   FileCode2, FilePen, FilePenLine, FilePlus2, FlaskConical, Folder, FolderGit2, FolderPlus,
   FolderTree, GitBranch, GitCommitHorizontal, GitCompare, Globe, Loader, Lock, MessagesSquare,
   Monitor, MonitorSmartphone, Move, Pin, Play, Plus, Radio, RefreshCw, Rocket, RotateCw, ScanEye,
-  Search, ShieldAlert, Signal, Smartphone, SquareArrowOutDownRight, SquareTerminal, Tablet,
-  Terminal, Upload, Wifi, X, type LucideIcon,
+  Search, Settings, ShieldAlert, Signal, Smartphone, SquareArrowOutDownRight, SquareTerminal, Tablet,
+  Terminal, Upload, Wifi, X,
+  Sparkles, Download, Save, MousePointerClick, MonitorOff, CheckCheck, FileImage, Image, File, FolderOpen,
+  Pause, Square, Flame, MinusCircle, type LucideIcon,
 } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 
@@ -13,6 +15,7 @@ import type { CSSProperties, ReactNode } from "react";
  *  screens use are imported, so they render synchronously and tree-shake. */
 const ICONS: Record<string, LucideIcon> = {
   "alert-octagon": AlertOctagon, "alert-triangle": AlertTriangle, "arrow-up": ArrowUp,
+  "arrow-up-left": ArrowUpLeft, eye: Eye, "eye-off": EyeOff, settings: Settings,
   asterisk: Asterisk, "at-sign": AtSign, "battery-full": BatteryFull, check: Check,
   "check-circle-2": CheckCircle2, "chevron-down": ChevronDown, "chevron-right": ChevronRight,
   circle: Circle, "corner-up-left": CornerUpLeft, database: Database, "database-zap": DatabaseZap,
@@ -26,6 +29,9 @@ const ICONS: Record<string, LucideIcon> = {
   search: Search, "shield-alert": ShieldAlert, signal: Signal, smartphone: Smartphone,
   "square-arrow-out-down-right": SquareArrowOutDownRight, "square-terminal": SquareTerminal,
   tablet: Tablet, terminal: Terminal, upload: Upload, wifi: Wifi, x: X,
+  sparkles: Sparkles, download: Download, save: Save, "mouse-pointer-click": MousePointerClick,
+  "monitor-off": MonitorOff, "check-check": CheckCheck, "file-image": FileImage, image: Image,
+  file: File, "folder-open": FolderOpen, pause: Pause, square: Square, flame: Flame, "minus-circle": MinusCircle,
 };
 
 /** Lucide icon by kebab-case name (the design references names verbatim). */

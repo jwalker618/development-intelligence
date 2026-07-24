@@ -9,19 +9,29 @@ const MODES: CavemanMode[] = ["off", "lite", "full", "ultra"];
 const BAR_H = [22, 46, 70, 100];
 const BAR_TINT = ["#2b4056", "#5a4326", "#8a5a24", "#a8641f"];
 
+const MODELS = [
+  { id: "Sonnet 4.5", sub: "Balanced · best for review loops" },
+  { id: "Opus 4.1", sub: "Deepest reasoning · slower, pricier" },
+  { id: "Haiku 4.5", sub: "Fastest · light edits and chores" },
+];
+
 export function SessionScreen({
-  s, chat, cavemanSavings, sample, onCaveman, onSend, onApproval, onInterrupt,
+  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, onModel,
 }: {
   s: SessionState;
   chat: ChatState;
   cavemanSavings: string | null;
   sample: typeof SAMPLE;
+  claudeConnected: boolean | null;
+  onConnect: () => void;
   onCaveman: (m: CavemanMode) => void;
   onSend: (text: string) => void;
   onApproval: (id: string, d: "allow" | "always" | "deny") => void;
   onInterrupt: () => void;
+  onModel: (m: string) => void;
 }) {
   const [pins, setPins] = useState(s.pins);
+  const [modelMenu, setModelMenu] = useState(false);
   return (
     <>
       {/* ── rail ── */}
@@ -94,31 +104,85 @@ export function SessionScreen({
         <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 9, padding: "14px 20px", borderBottom: "1px solid var(--cc-rule)" }}>
           <Icon name="asterisk" size={16} color="#c9d2dc" />
           <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--cc-ink)" }}>Claude Code</span>
-          <span style={{ fontSize: 10.5, color: "var(--cc-ink-mute)" }}>Anthropic{chat.model ? ` · ${chat.model}` : ""}</span>
-          <span style={{ flex: 1 }} />
-          {chat.busy ? (
+          {chat.busy && (
             <button className="di-btn" onClick={onInterrupt} style={{ display: "inline-flex", alignItems: "center", gap: 5, height: 22, padding: "0 9px", borderRadius: 999, background: "#132018", border: "1px solid #23402e", fontSize: 10.5, color: "#5fbf7f", cursor: "pointer" }}>
               <span style={{ width: 6, height: 6, borderRadius: 999, background: "#5fbf7f", animation: "di-pulse 1.4s infinite" }} />working · stop
             </button>
-          ) : (
-            <span style={{ fontSize: 10.5, color: "var(--cc-ink-mute)" }}>idle</span>
           )}
+          <span style={{ flex: 1 }} />
+          {/* model picker (41a) */}
+          <div style={{ position: "relative" }}>
+            <button className="di-btn" onClick={() => setModelMenu((m) => !m)} style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 28, padding: "0 12px", border: "1px solid #34608c", borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
+              <span style={{ width: 7, height: 7, borderRadius: 999, background: "var(--di-info)" }} />
+              <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>{chat.model ?? "Sonnet 4.5"}</span>
+              <Icon name="chevron-down" size={13} color="var(--cc-ink-mute)" />
+            </button>
+            {modelMenu && (
+              <>
+                <div onClick={() => setModelMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+                <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 260, zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
+                  <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9 }}>Model for this session</div>
+                  {MODELS.map((m) => {
+                    const active = (chat.model ?? "Sonnet 4.5") === m.id;
+                    return (
+                      <button key={m.id} className="di-row di-btn" onClick={() => { onModel(m.id); setModelMenu(false); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: "pointer", marginBottom: 2 }}>
+                        <Icon name={active ? "check-circle-2" : "circle"} size={15} color={active ? "var(--di-info)" : "#33475c"} />
+                        <span style={{ flex: 1 }}><span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{m.id}</span><span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{m.sub}</span></span>
+                      </button>
+                    );
+                  })}
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 8px 4px", borderTop: "1px solid #17293a", marginTop: 4 }}>
+                    <Icon name="lock" size={12} color="var(--di-ink-mute)" /><span style={{ fontSize: 10.5, color: "#6f8296" }}>Applies to new messages. Caveman keeps trimming context on any model.</span>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
         </div>
 
-        <ChatBody chat={chat} onApproval={onApproval} />
+        {claudeConnected === false
+          ? <NotConnected onConnect={onConnect} />
+          : <ChatBody chat={chat} onApproval={onApproval} onSend={onSend} />}
 
-        <Composer onSend={onSend} />
+        {claudeConnected !== false && chat.messages.length > 0 && <Composer onSend={onSend} />}
       </MainColumn>
     </>
   );
 }
 
-function ChatBody({ chat, onApproval }: { chat: ChatState; onApproval: (id: string, d: "allow" | "always" | "deny") => void }) {
+function NotConnected({ onConnect }: { onConnect: () => void }) {
+  return (
+    <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 40px" }}>
+      <div style={{ maxWidth: 420, textAlign: "center" }}>
+        <div style={{ width: 60, height: 60, margin: "0 auto 18px", borderRadius: 15, background: "#0e2233", border: "1px solid var(--di-rule)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="lock" size={27} color="var(--di-info)" /></div>
+        <div style={{ fontSize: 18, fontWeight: 600, color: "var(--di-ink)", letterSpacing: "-0.01em", marginBottom: 8 }}>Connect Claude to start</div>
+        <div style={{ fontSize: 13, color: "var(--di-ink-mute)", lineHeight: 1.55, marginBottom: 22 }}>Claude Code is not signed in yet. Connect your Anthropic account and the agent can begin working in this session.</div>
+        <button className="di-btn" onClick={onConnect} style={{ height: 44, padding: "0 20px", border: 0, borderRadius: 11, background: "var(--di-spot)", color: "#3a140a", fontFamily: "inherit", fontSize: 13.5, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 8 }}><Icon name="lock" size={15} />Connect Claude</button>
+      </div>
+    </div>
+  );
+}
+
+const SUGGESTIONS = ["Explain this repo", "Add a failing test", "Fix the pending filter"];
+
+function ChatBody({ chat, onApproval, onSend }: { chat: ChatState; onApproval: (id: string, d: "allow" | "always" | "deny") => void; onSend: (t: string) => void }) {
   if (chat.messages.length === 0) {
     return (
-      <div className="di-scroll" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--cc-ink-mute)", fontSize: 12.5 }}>
-        Message Claude Code to start the conversation.
-      </div>
+      <>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "0 40px", textAlign: "center" }}>
+          <div style={{ width: 56, height: 56, marginBottom: 16, borderRadius: 15, background: "#0e2233", border: "1px solid var(--di-rule)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="sparkles" size={26} color="var(--di-info)" /></div>
+          <div style={{ fontSize: 17, fontWeight: 600, color: "var(--di-ink)", marginBottom: 7 }}>What should Claude build?</div>
+          <div style={{ fontSize: 12.5, color: "var(--di-ink-mute)", marginBottom: 20 }}>Describe a change, paste an error, or pick a starting point.</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 9, justifyContent: "center", maxWidth: 440 }}>
+            {SUGGESTIONS.map((sug) => (
+              <button key={sug} className="di-btn" onClick={() => onSend(sug)} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "9px 13px", border: "1px solid var(--di-rule)", borderRadius: 999, background: "#0e2032", color: "var(--di-ink-soft)", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                <Icon name="sparkles" size={12} color="var(--di-info)" />{sug}
+              </button>
+            ))}
+          </div>
+        </div>
+        <Composer onSend={onSend} />
+      </>
     );
   }
   return (
