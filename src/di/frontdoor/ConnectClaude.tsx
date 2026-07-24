@@ -35,6 +35,18 @@ export function ConnectClaude({ onDone, onSkip }: { onDone: () => void; onSkip: 
     void api.claudeAuth().then(setStatus).catch(() => setStatus({ state: "idle", url: null, detail: null, tail: "" }));
   }, []);
 
+  // The setup-token CLI prints the URL — and later mints the token — asynchronously.
+  // Poll while a flow is in progress so the URL appears and "done" auto-advances.
+  const st = status?.state ?? "idle";
+  const inFlight = st === "starting" || st === "awaiting-code" || st === "verifying";
+  useEffect(() => {
+    if (!inFlight) return;
+    const t = setInterval(() => {
+      void api.claudeAuth().then((s) => { setStatus(s); if (s.state === "done") onDone(); }).catch(() => undefined);
+    }, 1200);
+    return () => clearInterval(t);
+  }, [inFlight, onDone]);
+
   const start = async () => {
     setBusy(true);
     try { setStatus(await api.claudeAuthStart()); } catch (e) { setStatus({ state: "error", url: null, detail: msg(e), tail: "" }); }
@@ -50,8 +62,6 @@ export function ConnectClaude({ onDone, onSkip }: { onDone: () => void; onSkip: 
   const cancel = async () => { try { await api.claudeAuthCancel(); } catch { /* noop */ } setStatus({ state: "idle", url: null, detail: null, tail: "" }); setCode(""); };
 
   if (manual) return <ManualToken onDone={onDone} onBack={() => setManual(false)} />;
-
-  const st = status?.state ?? "idle";
 
   // connected
   if (st === "done") {
@@ -121,10 +131,10 @@ export function ConnectClaude({ onDone, onSkip }: { onDone: () => void; onSkip: 
           </Step>
         </div>
 
-        {awaiting ? (
+        {inFlight ? (
           <>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 13px", border: "1px solid #234a6e", borderRadius: 11, background: "#0c1e30", marginBottom: 14 }}>
-              <Spinner /><span style={{ fontSize: 12, color: "#a9bccf", flex: 1 }}>{st === "verifying" ? "Verifying…" : "Waiting for you to authorize in the browser…"}</span>
+              <Spinner /><span style={{ fontSize: 12, color: "#a9bccf", flex: 1 }}>{st === "verifying" ? "Verifying…" : st === "starting" ? "Starting sign-in — fetching your link…" : "Waiting for you to authorize in the browser…"}</span>
             </div>
             <div style={{ display: "flex", gap: 10 }}>
               <button className="di-btn" onClick={cancel} style={{ flex: "0 0 auto", height: 44, padding: "0 16px", border: "1px solid var(--di-rule)", borderRadius: 11, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
