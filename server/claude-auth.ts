@@ -91,9 +91,15 @@ export class ClaudeAuth {
     // the first-run state so setup-token goes straight to the OAuth URL.
     preseedClaudeConfig(this.cfg);
 
-    // Mint fresh: a stale/revoked env token must not shadow the new login.
+    // Mint fresh: NO existing credential may shadow the new login. A blank or
+    // stale ANTHROPIC_API_KEY still occupies its precedence slot ahead of the
+    // OAuth token — it must be truly unset, not emptied — or setup-token can
+    // stall/misbehave. (sessionEnv only strips these once a token is stored,
+    // which is exactly not the case while we're minting the first one.)
     const env = sessionEnv(this.cfg);
     delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete env.ANTHROPIC_API_KEY;
+    delete env.ANTHROPIC_AUTH_TOKEN;
 
     let pty: PtyHandle;
     try {

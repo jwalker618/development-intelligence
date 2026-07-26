@@ -80,6 +80,11 @@ router.on("GET", "/api/preflight", () => {
     claudeTokenPreview: ct.preview,
     activeLogins: logins.count(),
     gitTokenSet: !!cfg.gitToken,
+    // A set (even empty-string) ANTHROPIC_API_KEY/AUTH_TOKEN outranks the OAuth
+    // subscription token in the CLI's credential precedence — a classic silent
+    // "auth failed". Surface it: `in` catches the empty-string case too.
+    anthropicApiKeyEnv: "ANTHROPIC_API_KEY" in process.env,
+    anthropicAuthTokenEnv: "ANTHROPIC_AUTH_TOKEN" in process.env,
     node: process.version,
   };
 });
