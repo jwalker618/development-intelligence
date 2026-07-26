@@ -115,6 +115,24 @@ export const DIAG_HTML = `<!doctype html>
   </div>
 
   <div class="card">
+    <h2>C · Terminal <span class="muted">— run <code>claude setup-token</code> here</span></h2>
+    <div class="muted">A real shell on this server. Run the CLI yourself and read its actual output — no scraping, no guessing. <b>Any <code>sk-ant-…</code> token that appears is captured and registered automatically.</b> Scrollback survives leaving this page.</div>
+    <div class="btns">
+      <button class="btn" id="t-start" onclick="termStart()">Open terminal</button>
+      <button class="btn secondary" onclick="termSend('claude setup-token')">Run: claude setup-token</button>
+      <button class="btn secondary" onclick="termSend('claude auth status')">Run: claude auth status</button>
+      <button class="btn secondary" onclick="termKill()">Kill</button>
+      <button class="btn secondary" onclick="termClear()">Clear</button>
+    </div>
+    <pre id="term-out" style="max-height:340px;margin-top:12px">(terminal not started)</pre>
+    <div style="display:flex;gap:9px;margin-top:9px">
+      <input id="term-in" placeholder="type a command, or paste the code, then Enter" autocomplete="off" spellcheck="false" style="flex:1" />
+      <button class="btn secondary" onclick="termCtrlC()" title="Ctrl-C">^C</button>
+    </div>
+    <div class="banner" id="term-banner"></div>
+  </div>
+
+  <div class="card">
     <h2>5 · Confirm Claude auth</h2>
     <div class="muted">Runs a tiny real request through the agent's exact auth path (~10–25s). A pass here means chat will authenticate.</div>
     <div class="btns"><button class="btn" id="cv-btn" onclick="verifyClaude()">Test Claude auth</button></div>
@@ -130,6 +148,14 @@ export const DIAG_HTML = `<!doctype html>
 <script>
 const CRED_KEY = "grotto-cred";
 const $ = (id) => document.getElementById(id);
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.target.id !== "term-in") return;
+  e.preventDefault();
+  const v = e.target.value;
+  e.target.value = "";
+  if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "input", data: v + "\\r" }));
+  else banner("term-banner", false, "Terminal not connected — press Open terminal first.");
+});
 const now = () => new Date().toISOString().slice(11, 19);
 function log(line) { const el = $("log"); el.textContent += "[" + now() + "] " + line + "\\n"; el.scrollTop = el.scrollHeight; }
 function cred() { try { return localStorage.getItem(CRED_KEY) || ""; } catch { return ""; } }
@@ -324,7 +350,40 @@ async function resumeAuth() {
   }
 }
 
+// ── terminal ────────────────────────────────────────────────────────────────
+let termWs = null;
+function termOut() { return $("term-out"); }
+function termAppend(s) { const el = termOut(); if (el.textContent === "(terminal not started)") el.textContent = ""; el.textContent += s; if (el.textContent.length > 40000) el.textContent = el.textContent.slice(-40000); el.scrollTop = el.scrollHeight; }
+function termConnect(onOpen) {
+  if (termWs && termWs.readyState === 1) { if (onOpen) onOpen(); return; }
+  if (!cred()) { banner("term-banner", false, "Log in first (step 2)."); return; }
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const url = proto + "//" + location.host + "/api/diag/term?token=" + encodeURIComponent(cred());
+  log("WS connect /api/diag/term");
+  termWs = new WebSocket(url);
+  termWs.onopen = () => { log("  -> terminal connected"); if (onOpen) onOpen(); };
+  termWs.onclose = () => { log("  -> terminal disconnected"); termWs = null; };
+  termWs.onerror = () => banner("term-banner", false, "Terminal socket error — is the credential still valid?");
+  termWs.onmessage = (e) => {
+    let f; try { f = JSON.parse(e.data); } catch { return; }
+    if (f.t === "hello") { if (f.data) { termOut().textContent = f.data; termOut().scrollTop = termOut().scrollHeight; } if (f.captured) banner("term-banner", true, "Token already captured: " + f.captured); if (!f.running) termAppend("\\n[no shell running — press Open terminal]\\n"); }
+    else if (f.t === "data") termAppend(f.data);
+    else if (f.t === "captured") { banner("term-banner", true, "Token captured and registered: " + f.detail + " — now run step 5 to verify."); preflight(); }
+    else if (f.t === "capture_failed") banner("term-banner", false, "Saw a token but could not store it: " + f.detail);
+    else if (f.t === "cleared") termOut().textContent = "";
+    else if (f.t === "exit") banner("term-banner", true, "Shell exited (code " + f.code + "). Press Open terminal to start a new one.");
+  };
+}
+function termStart() { termConnect(() => { termWs.send(JSON.stringify({ t: "start" })); banner("term-banner", true, "Terminal ready. Try: claude setup-token"); }); }
+function termSend(cmd) { termConnect(() => { termWs.send(JSON.stringify({ t: "start" })); setTimeout(() => termWs.send(JSON.stringify({ t: "input", data: cmd + "\\r" })), 400); }); }
+function termKill() { if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "kill" })); }
+function termClear() { if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "clear" })); else termOut().textContent = ""; }
+function termCtrlC() { if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "input", data: "\\u0003" })); }
+
 preflight();
 resumeAuth();
+// Reattach on load so scrollback (and a running setup-token) survive returning
+// to this page after authorising in another tab.
+if (cred()) termConnect();
 </script>
 </body></html>`;

@@ -29,6 +29,7 @@ import {
 } from "./files.js";
 import { verifyClaude } from "./claude-verify.js";
 import { DIAG_HTML } from "./diag.js";
+import { DiagTerm } from "./diag-term.js";
 import { assertOk, parseStatus, runGit, type GitResult } from "./git.js";
 import { createGithubRepo, listGithubRepos } from "./github.js";
 import { HttpError, Router, sendJson, serveStatic } from "./http.js";
@@ -43,6 +44,7 @@ preseedClaudeConfig(cfg); // no onboarding TUI, ever — see config.ts
 const manager = new SessionManager(cfg);
 const chats = new AgentChats(cfg);
 const claudeAuth = new ClaudeAuth(cfg);
+const diagTerm = new DiagTerm(cfg);
 const mfa = new Mfa(cfg);
 const pins = new Pins(cfg);
 const logins = new Logins(cfg);
@@ -681,6 +683,17 @@ const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", "http://local");
+
+  // Admin terminal for /diag — a real shell, no repo session required.
+  if (url.pathname === "/api/diag/term") {
+    if (!authorized(req, url.searchParams)) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => diagTerm.attach(ws));
+    return;
+  }
 
   const term = url.pathname.match(/^\/api\/sessions\/([^/]+)\/term$/);
   if (term) {
