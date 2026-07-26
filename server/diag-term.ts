@@ -73,11 +73,15 @@ export class DiagTerm {
   }
 
   private ingest(raw: string): void {
-    this.push(raw.replace(ANSI_RE, ""));
+    // Stream RAW bytes: the client is a real xterm.js terminal, so escape codes
+    // must survive for the TUI to render. (Stripping them is what made Claude's
+    // interactive UI unreadable.)
+    this.push(raw);
     // Auto-capture: setup-token PRINTS the token and does not save it anywhere,
     // so this is what turns "it appeared on screen" into "it is registered".
     if (this.captured) return;
-    const m = this.buffer.match(TOKEN_RE);
+    // Match against an ANSI-stripped view so styling can't split the token.
+    const m = this.buffer.replace(ANSI_RE, "").match(TOKEN_RE);
     if (!m) return;
     const token = m[0];
     try {

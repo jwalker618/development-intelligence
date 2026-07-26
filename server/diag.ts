@@ -8,6 +8,9 @@ export const DIAG_HTML = `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DI · Auth Console</title>
+<link rel="stylesheet" href="/diag/xterm.css">
+<script src="/diag/xterm.js"></script>
+<script src="/diag/addon-fit.js"></script>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -124,11 +127,8 @@ export const DIAG_HTML = `<!doctype html>
       <button class="btn secondary" onclick="termKill()">Kill</button>
       <button class="btn secondary" onclick="termClear()">Clear</button>
     </div>
-    <pre id="term-out" style="max-height:340px;margin-top:12px">(terminal not started)</pre>
-    <div style="display:flex;gap:9px;margin-top:9px">
-      <input id="term-in" placeholder="type a command, or paste the code, then Enter" autocomplete="off" spellcheck="false" style="flex:1" />
-      <button class="btn secondary" onclick="termCtrlC()" title="Ctrl-C">^C</button>
-    </div>
+    <div id="term-host" style="margin-top:12px;height:360px;background:#000;border:1px solid #14212f;border-radius:9px;padding:6px"></div>
+    <div class="muted" style="margin-top:6px">Type directly in the terminal — it's a real one. Paste works (⌘/Ctrl-V, or long-press on mobile).</div>
     <div class="banner" id="term-banner"></div>
   </div>
 
@@ -148,14 +148,6 @@ export const DIAG_HTML = `<!doctype html>
 <script>
 const CRED_KEY = "grotto-cred";
 const $ = (id) => document.getElementById(id);
-document.addEventListener("keydown", (e) => {
-  if (e.key !== "Enter" || e.target.id !== "term-in") return;
-  e.preventDefault();
-  const v = e.target.value;
-  e.target.value = "";
-  if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "input", data: v + "\\r" }));
-  else banner("term-banner", false, "Terminal not connected — press Open terminal first.");
-});
 const now = () => new Date().toISOString().slice(11, 19);
 function log(line) { const el = $("log"); el.textContent += "[" + now() + "] " + line + "\\n"; el.scrollTop = el.scrollHeight; }
 function cred() { try { return localStorage.getItem(CRED_KEY) || ""; } catch { return ""; } }
@@ -350,11 +342,35 @@ async function resumeAuth() {
   }
 }
 
-// ── terminal ────────────────────────────────────────────────────────────────
-let termWs = null;
-function termOut() { return $("term-out"); }
-function termAppend(s) { const el = termOut(); if (el.textContent === "(terminal not started)") el.textContent = ""; el.textContent += s; if (el.textContent.length > 40000) el.textContent = el.textContent.slice(-40000); el.scrollTop = el.scrollHeight; }
+// ── terminal (xterm.js — the same component VS Code uses) ───────────────────
+let termWs = null, term = null, fitAddon = null;
+function termInit() {
+  if (term) return term;
+  if (!window.Terminal) { banner("term-banner", false, "Terminal component failed to load (/diag/xterm.js)."); return null; }
+  term = new window.Terminal({
+    fontSize: 12, cursorBlink: true, convertEol: false, scrollback: 5000,
+    fontFamily: 'ui-monospace, Menlo, "DejaVu Sans Mono", monospace',
+    theme: { background: "#000000", foreground: "#dce6f0" },
+  });
+  try {
+    if (window.FitAddon && window.FitAddon.FitAddon) { fitAddon = new window.FitAddon.FitAddon(); term.loadAddon(fitAddon); }
+  } catch {}
+  term.open($("term-host"));
+  termFit();
+  // Every keystroke goes straight to the PTY — this is a real terminal.
+  term.onData((d) => { if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "input", data: d })); });
+  window.addEventListener("resize", termFit);
+  return term;
+}
+function termFit() {
+  if (!fitAddon || !term) return;
+  try {
+    fitAddon.fit();
+    if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "resize", cols: term.cols, rows: term.rows }));
+  } catch {}
+}
 function termConnect(onOpen) {
+  if (!termInit()) return;
   if (termWs && termWs.readyState === 1) { if (onOpen) onOpen(); return; }
   if (!cred()) { banner("term-banner", false, "Log in first (step 2)."); return; }
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -366,19 +382,23 @@ function termConnect(onOpen) {
   termWs.onerror = () => banner("term-banner", false, "Terminal socket error — is the credential still valid?");
   termWs.onmessage = (e) => {
     let f; try { f = JSON.parse(e.data); } catch { return; }
-    if (f.t === "hello") { if (f.data) { termOut().textContent = f.data; termOut().scrollTop = termOut().scrollHeight; } if (f.captured) banner("term-banner", true, "Token already captured: " + f.captured); if (!f.running) termAppend("\\n[no shell running — press Open terminal]\\n"); }
-    else if (f.t === "data") termAppend(f.data);
+    if (f.t === "hello") {
+      if (f.data) term.write(f.data);
+      if (f.captured) banner("term-banner", true, "Token already captured: " + f.captured);
+      if (!f.running) term.writeln("\\r\\n\\x1b[33m[no shell running — press Open terminal]\\x1b[0m");
+      termFit();
+    }
+    else if (f.t === "data") term.write(f.data);
     else if (f.t === "captured") { banner("term-banner", true, "Token captured and registered: " + f.detail + " — now run step 5 to verify."); preflight(); }
     else if (f.t === "capture_failed") banner("term-banner", false, "Saw a token but could not store it: " + f.detail);
-    else if (f.t === "cleared") termOut().textContent = "";
+    else if (f.t === "cleared") term.clear();
     else if (f.t === "exit") banner("term-banner", true, "Shell exited (code " + f.code + "). Press Open terminal to start a new one.");
   };
 }
-function termStart() { termConnect(() => { termWs.send(JSON.stringify({ t: "start" })); banner("term-banner", true, "Terminal ready. Try: claude setup-token"); }); }
-function termSend(cmd) { termConnect(() => { termWs.send(JSON.stringify({ t: "start" })); setTimeout(() => termWs.send(JSON.stringify({ t: "input", data: cmd + "\\r" })), 400); }); }
+function termStart() { termConnect(() => { termWs.send(JSON.stringify({ t: "start" })); setTimeout(termFit, 300); term.focus(); banner("term-banner", true, "Terminal ready. Run: claude setup-token"); }); }
+function termSend(cmd) { termConnect(() => { termWs.send(JSON.stringify({ t: "start" })); setTimeout(() => { termWs.send(JSON.stringify({ t: "input", data: cmd + "\\r" })); term.focus(); }, 500); }); }
 function termKill() { if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "kill" })); }
-function termClear() { if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "clear" })); else termOut().textContent = ""; }
-function termCtrlC() { if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "input", data: "\\u0003" })); }
+function termClear() { if (term) term.clear(); if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "clear" })); }
 
 preflight();
 resumeAuth();
