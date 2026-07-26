@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -664,6 +665,26 @@ const server = http.createServer(async (req, res) => {
     }
     const handled = await router.handle(req, res);
     if (!handled) sendJson(res, 404, { error: "not found" });
+    return;
+  }
+
+  // xterm.js assets for the /diag terminal, served straight out of node_modules
+  // so the console stays build-step-free and needs no CDN (egress may be closed).
+  if (url.pathname === "/diag/xterm.js" || url.pathname === "/diag/xterm.css" || url.pathname === "/diag/addon-fit.js") {
+    const rel =
+      url.pathname.endsWith("xterm.js") ? "@xterm/xterm/lib/xterm.js"
+        : url.pathname.endsWith("xterm.css") ? "@xterm/xterm/css/xterm.css"
+          : "@xterm/addon-fit/lib/addon-fit.js";
+    try {
+      const file = createRequire(import.meta.url).resolve(rel);
+      res.writeHead(200, {
+        "content-type": rel.endsWith(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8",
+        "cache-control": "public, max-age=3600",
+      });
+      res.end(fs.readFileSync(file));
+    } catch {
+      sendJson(res, 404, { error: "xterm asset not installed" });
+    }
     return;
   }
 
