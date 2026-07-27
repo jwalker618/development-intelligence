@@ -7,7 +7,8 @@ import {
   Search, Settings, ShieldAlert, Signal, Smartphone, SquareArrowOutDownRight, SquareTerminal, Tablet,
   Terminal, Upload, Wifi, X,
   Sparkles, Download, Save, MousePointerClick, MonitorOff, CheckCheck, FileImage, Image, File, FolderOpen,
-  Pause, Square, Flame, MinusCircle, User, Shield, ShieldOff, Info, Copy, Link, type LucideIcon,
+  Pause, Square, Flame, MinusCircle, User, Shield, ShieldOff, Info, Copy, Link,
+  Hand, ShieldX, ListChecks, FastForward, ShieldCheck, Beaker, ChevronLeft, MoreHorizontal, Trash2, Layers, CornerDownRight, ChevronUp, UploadCloud, Undo2, List, History, Ban, FoldVertical, Bookmark, Stethoscope, AlertCircle, TextCursorInput, Repeat, CircleDollarSign, CloudOff, type LucideIcon,
 } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 
@@ -34,6 +35,8 @@ const ICONS: Record<string, LucideIcon> = {
   file: File, "folder-open": FolderOpen, pause: Pause, square: Square, flame: Flame, "minus-circle": MinusCircle,
   user: User, shield: Shield, copy: Copy, link: Link,
   "shield-off": ShieldOff, info: Info,
+  // Added for the turns 43–49 design pass.
+  "hand": Hand, "shield-x": ShieldX, "list-checks": ListChecks, "fast-forward": FastForward, "shield-check": ShieldCheck, "beaker": Beaker, "chevron-left": ChevronLeft, "more-horizontal": MoreHorizontal, "trash-2": Trash2, "layers": Layers, "corner-down-right": CornerDownRight, "chevron-up": ChevronUp, "upload-cloud": UploadCloud, "undo-2": Undo2, "list": List, "history": History, "ban": Ban, "fold-vertical": FoldVertical, "bookmark": Bookmark, "stethoscope": Stethoscope, "alert-circle": AlertCircle, "text-cursor-input": TextCursorInput, "repeat": Repeat, "circle-dollar-sign": CircleDollarSign, "cloud-off": CloudOff,
 };
 
 /** Lucide icon by kebab-case name (the design references names verbatim). */

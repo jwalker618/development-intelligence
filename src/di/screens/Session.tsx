@@ -59,7 +59,6 @@ export function SessionScreen({
   onSearch: (q: string) => Promise<SearchHit[]>;
 }) {
   const pins = s.pins;
-  const [modelMenu, setModelMenu] = useState(false);
   const [pinDraft, setPinDraft] = useState("");
   const [addingPin, setAddingPin] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -187,44 +186,9 @@ export function SessionScreen({
             onBudget={onBudget}
             onMaxTurns={onMaxTurns}
           />
-          {/* reasoning-effort picker — only for models that support it */}
-          {(() => { const r = activeRow(models, chat.model, chat.activeModel); const lv = r ? (r.supportsEffort ? r.supportedEffortLevels : []) : []; return lv.length > 0 ? <EffortPicker value={chat.effort} levels={lv} onEffort={onEffort} /> : null; })()}
-          {/* model picker (41a) */}
-          <div style={{ position: "relative" }}>
-            <button className="di-btn" onClick={() => setModelMenu((m) => !m)} style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 28, padding: "0 12px", border: "1px solid #34608c", borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
-              <span style={{ width: 7, height: 7, borderRadius: 999, background: "var(--di-info)" }} />
-              <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>{activeRow(models, chat.model, chat.activeModel)?.displayName ?? (chat.model ?? "Default")}</span>
-              <Icon name="chevron-down" size={13} color="var(--cc-ink-mute)" />
-            </button>
-            {modelMenu && (
-              <>
-                <div onClick={() => setModelMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
-                <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 260, zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
-                  <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9, display: "flex", alignItems: "center", gap: 6 }}>
-                    Model for this session
-                    <button className="di-btn" onClick={onRefreshModels} title="Refresh model list"
-                      style={{ marginLeft: "auto", border: 0, background: "transparent", cursor: "pointer", padding: 0, display: "flex" }}>
-                      <Icon name="refresh-cw" size={11} color="var(--di-ink-mute)" />
-                    </button>
-                  </div>
-                  {models === null && <div style={{ padding: "10px 12px", fontSize: 11.5, color: "#6f8296" }}>Loading models…</div>}
-                  {models !== null && models.length === 0 && <div style={{ padding: "10px 12px", fontSize: 11.5, color: "var(--di-warn)" }}>No models returned — check Claude auth.</div>}
-                  {(models ?? []).map((m) => {
-                    const active = chat.model ? (chat.model === m.value || chat.model === m.resolvedModel) : false;
-                    return (
-                      <button key={m.value} className="di-row di-btn" onClick={() => { onModel(m.value); setModelMenu(false); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: "pointer", marginBottom: 2 }}>
-                        <Icon name={active ? "check-circle-2" : "circle"} size={15} color={active ? "var(--di-info)" : "#33475c"} />
-                        <span style={{ flex: 1, minWidth: 0 }}><span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{m.displayName}</span><span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{m.description}</span></span>
-                      </button>
-                    );
-                  })}
-                  <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 8px 4px", borderTop: "1px solid #17293a", marginTop: 4 }}>
-                    <Icon name="lock" size={12} color="var(--di-ink-mute)" /><span style={{ fontSize: 10.5, color: "#6f8296" }}>Live from Claude Code. Applies to new messages.</span>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
+          {/* Model and effort are ONE chip. Merging them is what makes the
+              header fit — five controls do not survive a 390px row (43c). */}
+          <RunChip models={models} chat={chat} onModel={onModel} onEffort={onEffort} onRefreshModels={onRefreshModels} />
         </div>
 
         {claudeConnected === false
@@ -508,35 +472,81 @@ const ROLE_META: Record<SearchHit["role"], { icon: string; color: string; label:
   system: { icon: "alert-triangle", color: "var(--di-neg)", label: "system" },
 };
 
-/** Reasoning-effort picker — sits beside the model pill. Default is High. */
-function EffortPicker({ value, levels, onEffort }: { value: string | null; levels: string[]; onEffort: (e: string | null) => void }) {
+/**
+ * Model and effort in one chip.
+ *
+ * The header carries title · thinking · working/stop · leash · run — five
+ * things. At 390px that is one row too many, so model and effort merge into a
+ * single `Sonnet 4.5 · high` chip that opens a sheet with both (43a/43c).
+ */
+function RunChip({ models, chat, onModel, onEffort, onRefreshModels }: {
+  models: ModelRow[] | null;
+  chat: ChatState;
+  onModel: (m: string) => void;
+  onEffort: (e: string | null) => void;
+  onRefreshModels: () => void;
+}) {
   const [open, setOpen] = useState(false);
-  // Only levels this model actually supports (from the SDK catalog).
-  const rows = levels.map((id) => ({ id, ...(EFFORT_META[id] ?? { label: id, sub: "" }) }));
-  const current = rows.find((e) => e.id === value) ?? rows.find((e) => e.id === "high") ?? rows[rows.length - 1];
+  const row = activeRow(models, chat.model, chat.activeModel);
+  const levels = row?.supportsEffort ? row.supportedEffortLevels : [];
+  const name = row?.displayName ?? chat.model ?? "Default";
   return (
     <div style={{ position: "relative" }}>
-      <button className="di-btn" onClick={() => setOpen((o) => !o)} title="Reasoning effort" style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 28, padding: "0 11px", border: "1px solid #34608c", borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
-        <Icon name="flame" size={12} color="var(--di-warn)" />
-        <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>{current.label}</span>
-        <Icon name="chevron-down" size={13} color="var(--cc-ink-mute)" />
+      <button className="di-btn" onClick={() => setOpen((v) => !v)} aria-expanded={open} aria-label="Model and effort"
+        style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 28, padding: "0 11px", border: "1px solid #24384f", borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
+        <span style={{ fontSize: 11.5, color: "var(--cc-ink)" }}>{name}</span>
+        {chat.effort && levels.length > 0 && (
+          <>
+            <span style={{ color: "#3e5670" }}>·</span>
+            <span className="di-mono" style={{ fontSize: 11, color: "var(--di-ink-mute)" }}>{chat.effort}</span>
+          </>
+        )}
+        <Icon name="chevron-down" size={12} color="var(--cc-ink-mute)" />
       </button>
       {open && (
         <>
           <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
-          <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 230, zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
-            <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9 }}>Reasoning effort</div>
-            {rows.map((e) => {
-              const active = current.id === e.id;
+          <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 288, maxWidth: "calc(100vw - 32px)", zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
+            <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9, display: "flex", alignItems: "center", gap: 6 }}>
+              Model
+              <button className="di-btn" onClick={onRefreshModels} title="Refresh model list"
+                style={{ marginLeft: "auto", border: 0, background: "transparent", cursor: "pointer", padding: 0, display: "flex" }}>
+                <Icon name="refresh-cw" size={11} color="var(--di-ink-mute)" />
+              </button>
+            </div>
+            {models === null && <div style={{ padding: "10px 12px", fontSize: 11.5, color: "#6f8296" }}>Loading models…</div>}
+            {models !== null && models.length === 0 && <div style={{ padding: "10px 12px", fontSize: 11.5, color: "var(--di-warn)" }}>No models returned — check Claude auth.</div>}
+            {(models ?? []).map((m) => {
+              const active = chat.model ? (chat.model === m.value || chat.model === m.resolvedModel) : false;
               return (
-                <button key={e.id} className="di-row di-btn" onClick={() => { onEffort(e.id); setOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: "pointer", marginBottom: 2 }}>
-                  <Icon name={active ? "check-circle-2" : "circle"} size={15} color={active ? "var(--di-warn)" : "#33475c"} />
-                  <span style={{ flex: 1 }}><span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{e.label}</span><span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{e.sub}</span></span>
+                <button key={m.value} className="di-row di-btn" onClick={() => onModel(m.value)}
+                  style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "9px 11px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: "pointer", marginBottom: 2 }}>
+                  <Icon name={active ? "check-circle-2" : "circle"} size={15} color={active ? "var(--di-info)" : "#33475c"} />
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{m.displayName}</span>
+                    <span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{m.description}</span>
+                  </span>
                 </button>
               );
             })}
+            {levels.length > 0 && (
+              <div style={{ borderTop: "1px solid #17293a", marginTop: 5, paddingTop: 9 }}>
+                <div className="di-eyebrow" style={{ padding: "0 6px 8px", fontSize: 9 }}>Effort</div>
+                <div style={{ display: "flex", gap: 4, padding: "0 4px 4px" }}>
+                  {levels.map((lv) => {
+                    const on = chat.effort === lv;
+                    return (
+                      <button key={lv} className="di-btn" onClick={() => onEffort(on ? null : lv)} title={EFFORT_META[lv]?.sub ?? lv}
+                        style={{ flex: 1, height: 30, borderRadius: 8, border: `1px solid ${on ? "#34608c" : "transparent"}`, background: on ? "#12283f" : "transparent", color: on ? "var(--di-ink)" : "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 11, fontWeight: 600, cursor: "pointer", textTransform: "capitalize" }}>
+                        {EFFORT_META[lv]?.label ?? lv}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 8px 4px", borderTop: "1px solid #17293a", marginTop: 4 }}>
-              <Icon name="lock" size={12} color="var(--di-ink-mute)" /><span style={{ fontSize: 10.5, color: "#6f8296" }}>Higher effort = deeper thinking, more tokens. Applies to your next message.</span>
+              <Icon name="lock" size={12} color="var(--di-ink-mute)" /><span style={{ fontSize: 10.5, color: "#6f8296" }}>Live from Claude Code. Applies to new messages.</span>
             </div>
           </div>
         </>
@@ -545,7 +555,6 @@ function EffortPicker({ value, levels, onEffort }: { value: string | null; level
   );
 }
 
-/** ⌘K transcript search — live against /api/sessions/:id/transcript/search. */
 function SearchOverlay({ onSearch, onClose }: { onSearch: (q: string) => Promise<SearchHit[]>; onClose: () => void }) {
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
@@ -746,16 +755,68 @@ function HookLiveness({ hooks }: { hooks: ChatState["hooks"] }) {
 }
 
 /**
- * How long the agent's leash is — the choice a phone-first reviewer makes
- * before pocketing the phone. `bypassPermissions` is deliberately not offered:
- * a review-first IDE has no use for a mode that removes the human.
+ * The leash — how much rope the agent has.
+ *
+ * Design 43a–43d. Three things carry the mode instead of one grey pill: a
+ * glyph, a label, and a four-notch ROPE GAUGE. The ladder is ordered tightest →
+ * loosest so the gauge fills downward and the order itself carries meaning —
+ * "waits" and "refuses" are never the same object.
  */
-const LEASH: Array<{ id: string; label: string; sub: string }> = [
-  { id: "default", label: "Ask me", sub: "Approve every state change" },
-  { id: "acceptEdits", label: "Auto-accept edits", sub: "File edits go through; commands still ask" },
-  { id: "plan", label: "Plan first", sub: "Propose before touching anything" },
-  { id: "dontAsk", label: "Fail closed", sub: "Deny anything not pre-approved" },
+interface Leash {
+  id: string;
+  label: string;
+  /** Present tense, second person — this is the posture readout, not a hint. */
+  readout: string;
+  sub: string;
+  tone: string;
+  icon: string;
+  /** Filled notches out of four; `dashed` marks the one Plan first shows. */
+  notches: number;
+  dashed?: boolean;
+  /** Fail closed is the only one that reads as a lock. */
+  lock?: boolean;
+  /** Fill for the unlit notches when this mode is the active one. */
+  dim: string;
+}
+
+const LEASH: Leash[] = [
+  { id: "dontAsk", label: "Fail closed", tone: "var(--di-neg)", icon: "shield-x", notches: 0, lock: true, dim: "#3a1c1c",
+    readout: "The agent refuses anything not already approved. It will not come back to ask.",
+    sub: "Refuses anything not already approved. It will not come back to ask." },
+  { id: "plan", label: "Plan first", tone: "var(--di-aux)", icon: "list-checks", notches: 1, dashed: true, dim: "#1c2540",
+    readout: "The agent proposes and touches nothing. Approving means reading the plan and coming back here.",
+    sub: "Proposes and touches nothing. Approving means reading the plan and coming back here." },
+  { id: "default", label: "Ask me", tone: "var(--di-spot)", icon: "hand", notches: 1, dim: "#3a2013",
+    readout: "The agent stops and waits for you before every state change.",
+    sub: "Every state change waits for your yes — edits, commands, everything." },
+  { id: "acceptEdits", label: "Auto-accept edits", tone: "var(--di-info)", icon: "fast-forward", notches: 3, dim: "#123830",
+    readout: "File edits go through on their own. Commands still stop and wait for you.",
+    sub: "File edits go through without asking. Commands still stop for you." },
 ];
+
+const leashOf = (id: string): Leash => LEASH.find((l) => l.id === id) ?? LEASH[2];
+
+/** The rope. Four notches, filled left to right; `dashed` outlines the first
+ *  instead of filling it, which is how "proposes but does not act" reads. */
+function RopeGauge({ l, lit, size = 9 }: { l: Leash; lit: boolean; size?: number }) {
+  return (
+    <span style={{ display: "inline-flex", gap: 2, alignItems: "center", flex: "0 0 auto" }}>
+      {l.lock && <Icon name="lock" size={10} color={l.tone} style={{ marginRight: 2 }} />}
+      {[0, 1, 2, 3].map((i) => {
+        const on = i < l.notches;
+        const dashed = on && l.dashed;
+        return (
+          <span key={i} style={{
+            width: size, height: 4, borderRadius: 2, boxSizing: "border-box",
+            ...(dashed
+              ? { border: `1px dashed ${l.tone}` }
+              : { background: on ? l.tone : lit ? l.dim : "#24384f" }),
+          }} />
+        );
+      })}
+    </span>
+  );
+}
 
 function LeashPill({ mode, readOnly, budgetUsd, maxTurns, costsAreReal, onMode, onReadOnly, onBudget, onMaxTurns }: {
   mode: string;
@@ -771,96 +832,203 @@ function LeashPill({ mode, readOnly, budgetUsd, maxTurns, costsAreReal, onMode, 
   const [open, setOpen] = useState(false);
   const [budgetDraft, setBudgetDraft] = useState("");
   const [turnsDraft, setTurnsDraft] = useState("");
-  const current = LEASH.find((l) => l.id === mode) ?? LEASH[0];
-  const tone = readOnly ? "var(--di-pos)" : mode === "default" ? "var(--di-info)" : "var(--di-warn)";
+  const cur = leashOf(mode);
+
   return (
     <div style={{ position: "relative" }}>
       <button className="di-btn" onClick={() => setOpen((v) => !v)} aria-expanded={open}
-        style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 28, padding: "0 12px", border: `1px solid ${tone}55`, borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
-        <Icon name={readOnly ? "eye" : mode === "default" ? "shield" : "shield-alert"} size={13} color={tone} />
-        <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>
-          {readOnly ? "Read-only" : current.label}
+        aria-label={readOnly ? "Review-only" : `Leash: ${cur.label}`}
+        style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 28, padding: "0 11px",
+          border: `1px solid ${readOnly ? "#2a6b5e" : "#3a2a20"}`, borderRadius: 999,
+          background: readOnly ? "#0e2a26" : "#2a150c", cursor: "pointer" }}>
+        <Icon name={readOnly ? "shield-check" : cur.icon} size={13} color={readOnly ? "var(--di-info)" : cur.tone} />
+        <span style={{ fontSize: 12, fontWeight: 600, color: readOnly ? "#b8f2e5" : "#fbd0ba" }}>
+          {readOnly ? "Review-only" : cur.label}
         </span>
-        <Icon name="chevron-down" size={13} color="var(--cc-ink-mute)" />
+        {!readOnly && <RopeGauge l={cur} lit />}
+        <Icon name="chevron-down" size={12} color="var(--cc-ink-mute)" />
       </button>
+
       {open && (
         <>
           <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
-          <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 288, zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
-            <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9 }}>How much may Claude do alone?</div>
-            {LEASH.map((l) => {
-              const active = l.id === mode;
-              return (
-                <button key={l.id} className="di-row di-btn" disabled={readOnly}
-                  onClick={() => { onMode(l.id); setOpen(false); }}
-                  style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "9px 11px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: readOnly ? "default" : "pointer", opacity: readOnly ? 0.45 : 1, marginBottom: 2 }}>
-                  <Icon name={active ? "check-circle-2" : "circle"} size={15} color={active ? "var(--di-info)" : "#33475c"} />
-                  <span style={{ flex: 1, minWidth: 0 }}>
-                    <span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{l.label}</span>
-                    <span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{l.sub}</span>
-                  </span>
-                </button>
-              );
-            })}
+          <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 412, maxWidth: "calc(100vw - 32px)", zIndex: 21, border: "1px solid #2c5075", borderRadius: 14, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: "13px 14px 14px" }}>
+            <div className="di-eyebrow" style={{ fontSize: 9.5, marginBottom: 9 }}>Leash</div>
 
-            {/* Read-only is not a mode — it REMOVES the mutating tools, so the
-                promise holds even if the model is asked nicely. */}
-            <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 11px", borderTop: "1px solid #17293a", marginTop: 5, cursor: "pointer" }}>
-              <input type="checkbox" checked={readOnly} onChange={(e) => onReadOnly(e.target.checked)} style={{ accentColor: "var(--di-pos)" }} />
-              <span style={{ flex: 1, minWidth: 0 }}>
-                <span style={{ display: "block", fontSize: 12, color: "var(--di-ink)" }}>Read-only review</span>
-                <span style={{ display: "block", fontSize: 10.5, color: "#6f8296", lineHeight: 1.4 }}>Write, Edit and Bash are removed from the session — not just discouraged.</span>
-              </span>
-            </label>
-
-            {/* A cheap model can loop for a long time for very little money
-                while producing enormous review churn — so this brake is
-                orthogonal to the spend one, and is offered on every auth. */}
-            <div style={{ padding: "10px 11px", borderTop: "1px solid #17293a" }}>
-              <div className="di-eyebrow" style={{ fontSize: 9, marginBottom: 7 }}>Stop after</div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, height: 32, padding: "0 10px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "#0e2032" }}>
-                  <input value={turnsDraft} onChange={(e) => setTurnsDraft(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") { const n = Number(turnsDraft); onMaxTurns(Number.isFinite(n) && n > 0 ? n : null); setOpen(false); } }}
-                    placeholder={maxTurns ? String(maxTurns) : "no limit"}
-                    className="di-mono" style={{ flex: 1, minWidth: 0, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 12 }} />
-                  <span style={{ fontSize: 11, color: "#6f8296" }}>turns</span>
-                </div>
-                {maxTurns !== null && (
-                  <button className="di-btn" onClick={() => { onMaxTurns(null); setTurnsDraft(""); }}
-                    style={{ flex: "0 0 auto", height: 32, padding: "0 11px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 11.5, cursor: "pointer" }}>Clear</button>
-                )}
-              </div>
-            </div>
-
-            {costsAreReal ? (
-              <div style={{ padding: "10px 11px", borderTop: "1px solid #17293a" }}>
-                <div className="di-eyebrow" style={{ fontSize: 9, marginBottom: 7 }}>Spend ceiling</div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, height: 32, padding: "0 10px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "#0e2032" }}>
-                    <span style={{ fontSize: 12, color: "#6f8296" }}>$</span>
-                    <input value={budgetDraft} onChange={(e) => setBudgetDraft(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") { const n = Number(budgetDraft); onBudget(Number.isFinite(n) && n > 0 ? n : null); setOpen(false); } }}
-                      placeholder={budgetUsd ? String(budgetUsd) : "no limit"}
-                      className="di-mono" style={{ flex: 1, minWidth: 0, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 12 }} />
+            {readOnly ? (
+              <>
+                {/* Review-only OUTRANKS the modes: it is a guarantee, so it
+                    takes the top of the panel and the ladder parks below it. */}
+                <div style={{ border: "1px solid #2a6b5e", borderRadius: 12, background: "#0e2a26", padding: "12px 13px", marginBottom: 9 }}>
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 11, marginBottom: 9 }}>
+                    <span style={{ flex: "0 0 auto", width: 34, height: 34, borderRadius: 10, background: "#12352f", border: "1px solid #2a6b5e", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <Icon name="shield-check" size={16} color="var(--di-info)" />
+                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="di-eyebrow" style={{ fontSize: 9, color: "var(--di-info)" }}>Right now</div>
+                      <div style={{ fontSize: 14.5, fontWeight: 600, color: "var(--di-ink)" }}>Review-only · on</div>
+                    </div>
+                    <Toggle on onChange={() => onReadOnly(false)} label="Review-only" />
                   </div>
-                  {budgetUsd !== null && (
-                    <button className="di-btn" onClick={() => { onBudget(null); setBudgetDraft(""); }}
-                      style={{ flex: "0 0 auto", height: 32, padding: "0 11px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 11.5, cursor: "pointer" }}>Clear</button>
-                  )}
+                  <div style={{ fontSize: 12, color: "#c9e6df", lineHeight: 1.5, marginBottom: 10 }}>
+                    Write, Edit and Bash are <b style={{ color: "var(--di-ink)" }}>not in this session</b>. This is a
+                    guarantee, not a preference — the tools are gone, so there is nothing to deny.
+                  </div>
+                  <div style={{ display: "flex", gap: 7 }}>
+                    {["Write", "Edit", "Bash"].map((t) => (
+                      <span key={t} className="di-mono" style={{ fontSize: 10.5, color: "#6f8296", textDecoration: "line-through", border: "1px solid #24384f", borderRadius: 999, padding: "2px 11px", background: "#0c1e30" }}>{t}</span>
+                    ))}
+                  </div>
                 </div>
-                <div style={{ fontSize: 10, color: "#6f8296", marginTop: 6, lineHeight: 1.4 }}>The turn stops when this is exceeded. Raise it here to continue.</div>
-              </div>
+                <div style={{ border: "1px solid #24384f", borderRadius: 11, background: "#0c1e30", padding: "10px 12px", marginBottom: 11, fontSize: 11.5, color: "#93a4b5", lineHeight: 1.5 }}>
+                  Verified: asked to write a file, the agent tried Write, tried to route it through a subagent, and the file was never created.
+                </div>
+              </>
             ) : (
-              // Never show a dollar ceiling we cannot honestly meter.
-              <div style={{ padding: "10px 11px", borderTop: "1px solid #17293a", fontSize: 10.5, color: "#6f8296", lineHeight: 1.45 }}>
-                Spend ceiling is unavailable on subscription auth — the cost figures the SDK reports are notional there.
+              /* The at-a-glance answer, tinted to the current mode. The ladder
+                 below is the change control; this is the readout. */
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 11, border: `1px solid ${cur.tone}44`, borderRadius: 12, background: "#1e1109", padding: "12px 13px", marginBottom: 13 }}>
+                <span style={{ flex: "0 0 auto", width: 34, height: 34, borderRadius: 10, background: "#2a150c", border: `1px solid ${cur.tone}55`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Icon name={cur.icon} size={16} color={cur.tone} />
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="di-eyebrow" style={{ fontSize: 9, color: cur.tone, marginBottom: 2 }}>Right now</div>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--di-ink)", lineHeight: 1.4 }}>{cur.readout}</div>
+                </div>
               </div>
             )}
+
+            <div className="di-eyebrow" style={{ fontSize: 9.5, padding: "0 2px 9px", display: "flex", alignItems: "center" }}>
+              How much rope
+              {readOnly && <span style={{ marginLeft: "auto", fontSize: 10, textTransform: "none", letterSpacing: 0, color: "#6f8296", fontWeight: 400 }}>parked</span>}
+            </div>
+
+            <div style={{ opacity: readOnly ? 0.42 : 1 }}>
+              {LEASH.map((l) => {
+                const active = l.id === mode;
+                return (
+                  <button key={l.id} className="di-qrow di-btn" disabled={readOnly}
+                    onClick={() => { onMode(l.id); setOpen(false); }}
+                    style={{ display: "flex", alignItems: "flex-start", gap: 11, width: "100%", textAlign: "left",
+                      padding: readOnly ? "8px 11px" : "10px 11px", borderRadius: 11, marginBottom: 6,
+                      border: `1px solid ${active && !readOnly ? `${l.tone}55` : "#16334f"}`,
+                      background: active && !readOnly ? "#160f0a" : "transparent",
+                      cursor: readOnly ? "default" : "pointer" }}>
+                    <span style={{ flex: "0 0 auto", width: 30, height: 30, borderRadius: 9, background: "#12283f", border: "1px solid #24384f", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <Icon name={l.icon} size={15} color={l.tone} />
+                    </span>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--di-ink)" }}>{l.label}</span>
+                        {l.id === "default" && !readOnly && (
+                          <span className="di-eyebrow" style={{ fontSize: 8.5, color: "var(--di-spot)", border: "1px solid #5a3316", borderRadius: 999, padding: "1px 6px" }}>default</span>
+                        )}
+                        {active && readOnly && (
+                          <span className="di-eyebrow" style={{ fontSize: 8.5, color: "#6f8296", border: "1px solid #24384f", borderRadius: 999, padding: "1px 6px" }}>was set</span>
+                        )}
+                        <span style={{ marginLeft: "auto" }}><RopeGauge l={l} lit={active} /></span>
+                      </span>
+                      {!readOnly && (
+                        <span style={{ display: "block", fontSize: 11.5, color: "#98a6b8", lineHeight: 1.45, marginTop: 3 }}>{l.sub}</span>
+                      )}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {readOnly ? (
+              <div style={{ fontSize: 11, color: "#6f8296", padding: "2px 2px 11px" }}>Modes come back when review-only is off.</div>
+            ) : (
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 11, border: "1px solid #16334f", borderRadius: 11, padding: "10px 11px", marginBottom: 11 }}>
+                <span style={{ flex: "0 0 auto", width: 30, height: 30, borderRadius: 9, background: "#12283f", border: "1px solid #24384f", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Icon name="shield-check" size={15} color="#6f8296" />
+                </span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "var(--di-ink)" }}>Review-only</span>
+                  <span style={{ display: "block", fontSize: 11.5, color: "#98a6b8", lineHeight: 1.45 }}>Not a mode — it removes Write, Edit and Bash from the session.</span>
+                </span>
+                <Toggle on={false} onChange={() => onReadOnly(true)} label="Review-only" />
+              </div>
+            )}
+
+            {/* Both numeric limits under one heading, because the obvious
+                question is why there are two. */}
+            <div style={{ borderTop: "1px solid #17293a", paddingTop: 11 }}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 3 }}>
+                <span className="di-eyebrow" style={{ fontSize: 9.5 }}>Brakes</span>
+                {costsAreReal && <span style={{ fontSize: 10, color: "#6f8296" }}>billed rates · API key</span>}
+              </div>
+              <div style={{ fontSize: 11, color: "#6f8296", lineHeight: 1.45, marginBottom: 9 }}>
+                Two different runaways: one costs money, one costs you a review.
+              </div>
+
+              <BrakeRow label="Stop after" unit="turns" value={maxTurns} draft={turnsDraft} setDraft={setTurnsDraft}
+                onSet={(n) => { onMaxTurns(n); setOpen(false); }}
+                note="A cheap model can loop for hours for pennies and leave you a hundred files to read. Offered on every account." />
+
+              {costsAreReal ? (
+                <BrakeRow label="Spend ceiling" unit="" prefix="$" value={budgetUsd} draft={budgetDraft} setDraft={setBudgetDraft}
+                  onSet={(n) => { onBudget(n); setOpen(false); }}
+                  note="The turn stops when the session's spend passes this. Raise it here to carry on." />
+              ) : (
+                /* Prose, not a disabled input — the menu keeps its shape
+                   between accounts, so the brake does not appear to vanish. */
+                <div>
+                  <div style={{ fontSize: 12, color: "var(--di-ink-soft)", marginBottom: 3 }}>Spend ceiling</div>
+                  <div style={{ fontSize: 11.5, color: "#6f8296", lineHeight: 1.5 }}>
+                    Not available on this account — you are signed in on a subscription, so the dollar figures are
+                    notional. It comes back with an API key.
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </>
       )}
     </div>
+  );
+}
+
+/** One numeric brake. Empty means no limit — never a 0. */
+function BrakeRow({ label, unit, prefix, value, draft, setDraft, onSet, note }: {
+  label: string; unit: string; prefix?: string; value: number | null;
+  draft: string; setDraft: (v: string) => void; onSet: (n: number | null) => void; note: string;
+}) {
+  const commit = () => { const n = Number(draft); onSet(Number.isFinite(n) && n > 0 ? n : null); };
+  return (
+    <div style={{ marginBottom: 11 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 4 }}>
+        <span style={{ flex: 1, fontSize: 12, color: "var(--di-ink-soft)" }}>{label}</span>
+        <div style={{ flex: "0 0 116px", display: "flex", alignItems: "center", gap: 5, height: 32, padding: "0 10px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "#0e2032" }}>
+          {prefix && <span style={{ fontSize: 12, color: "#6f8296" }}>{prefix}</span>}
+          <input value={draft} onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && commit()} onBlur={() => draft && commit()}
+            placeholder={value !== null ? String(value) : "no limit"} aria-label={label}
+            className="di-mono" style={{ flex: 1, minWidth: 0, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 12 }} />
+          {unit && <span style={{ fontSize: 11, color: "#6f8296" }}>{unit}</span>}
+        </div>
+        {value !== null && (
+          <button className="di-btn" onClick={() => { onSet(null); setDraft(""); }} aria-label={`Clear ${label}`}
+            style={{ flex: "0 0 auto", border: 0, background: "transparent", cursor: "pointer", padding: 2, display: "flex" }}>
+            <Icon name="x" size={13} color="var(--di-ink-mute)" />
+          </button>
+        )}
+      </div>
+      <div style={{ fontSize: 11.5, color: "#6f8296", lineHeight: 1.5 }}>{note}</div>
+    </div>
+  );
+}
+
+/** The design uses a real switch, not a checkbox — read-only is a state you
+ *  flip, not a form field you tick. */
+function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <button className="di-btn" role="switch" aria-checked={on} aria-label={label} onClick={() => onChange(!on)}
+      style={{ flex: "0 0 auto", width: 40, height: 22, borderRadius: 999, border: 0, cursor: "pointer", padding: 2,
+        background: on ? "var(--di-info)" : "#24384f", display: "flex", justifyContent: on ? "flex-end" : "flex-start", alignItems: "center" }}>
+      <span style={{ width: 18, height: 18, borderRadius: 999, background: on ? "#062420" : "#8fa6b5", display: "block" }} />
+    </button>
   );
 }
 
