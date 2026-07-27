@@ -28,6 +28,16 @@ export interface Live {
   /** The CLI's own view of this session: context meter, account, inventories.
    *  Null until the first status read lands. */
   status: ChatStatus | null;
+  /** When `status` was last read. Offline shows the age of what is on screen
+   *  rather than blanking it (49b). */
+  statusAt: number | null;
+  /** The socket is down and has not come back.
+   *
+   *  NOT `conn === "offline"`: the reconnect loop flips straight to
+   *  "connecting", so that state lasts a single frame and the offline
+   *  treatment never appeared. This stays true for the whole outage — which is
+   *  the entire point of the state — and clears only on a successful open. */
+  offline: boolean;
   sample: typeof SAMPLE;
   conn: Conn;
   error: string | null;
@@ -85,9 +95,11 @@ export function useControl(sessionId: string | null): Live {
   const [models, setModels] = useState<ModelRow[] | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [status, setStatus] = useState<ChatStatus | null>(null);
+  const [statusAt, setStatusAt] = useState<number | null>(null);
   const statusFor = useRef<string | null>(null);
   const modelsFor = useRef<string | null>(null);
   const [conn, setConn] = useState<Conn>("loading");
+  const [offline, setOffline] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const reviewed = useRef(new Set<string>());
 
@@ -140,6 +152,7 @@ export function useControl(sessionId: string | null): Live {
   useEffect(() => {
     setActiveDiff(null);
     reviewed.current = new Set();
+    setOffline(false);
     if (!sessionId) { setConn("live"); return; }
     setConn("loading");
     let stop: (() => void) | undefined;
@@ -161,7 +174,11 @@ export function useControl(sessionId: string | null): Live {
           ...c,
           messages: c.messages.map((m) => (m.toolUseId === toolUseId ? { ...m, elapsed: seconds } : m)),
         })),
-        onConn: (cc) => setConn(cc),
+        onConn: (cc) => {
+          setConn(cc);
+          if (cc === "offline") setOffline(true);
+          if (cc === "live") setOffline(false);
+        },
       });
     })();
     return () => stop?.();
@@ -190,6 +207,7 @@ export function useControl(sessionId: string | null): Live {
       const st = await api.chatStatus(id, warm);
       if (statusFor.current === id) {
         setStatus(st);
+        setStatusAt(Date.now());
         setChat((c) => ({
           ...c,
           permissionMode: st.permissionMode,
@@ -212,10 +230,12 @@ export function useControl(sessionId: string | null): Live {
   // Refresh the context meter after each turn — it only moves when the agent
   // has said something, so this is cheaper and truer than polling on a timer.
   useEffect(() => {
-    if (!sessionId || chat.busy) return;
+    // Offline: leave the last figure frozen with its age rather than firing a
+    // refresh that will fail and blank it.
+    if (!sessionId || chat.busy || offline) return;
     const t = setTimeout(() => void loadStatus(sessionId), 800);
     return () => clearTimeout(t);
-  }, [sessionId, chat.busy, loadStatus]);
+  }, [sessionId, chat.busy, offline, loadStatus]);
 
   // Mirror the caveman flag on a ~15s poll.
   useEffect(() => {
@@ -358,7 +378,7 @@ export function useControl(sessionId: string | null): Live {
     refresh: () => { if (sessionId) void loadSession(sessionId); },
   };
 
-  return { state, sessions, chat, models, usage, trees, tree: trees[0] ?? null, repos, syncing, activeDiff, cavemanSavings, status, sample: SAMPLE, conn, error, actions };
+  return { state, sessions, chat, models, usage, trees, tree: trees[0] ?? null, repos, syncing, activeDiff, cavemanSavings, status, statusAt, offline, sample: SAMPLE, conn, error, actions };
 }
 
 function foldOne(ev: { kind?: string; [k: string]: unknown }): ChatMsg[] {

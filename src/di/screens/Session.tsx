@@ -30,7 +30,7 @@ function activeRow(rows: ModelRow[] | null, model: string | null, active: string
 }
 
 export function SessionScreen({
-  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, usage, status, onModel, onEffort, onRefreshModels, onPermissionMode, onReadOnly, onBudget, onMaxTurns, onOpenDiagnostics, onPreviewRewind, onRewind, onAddPin, onRemovePin, onSearch,
+  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, usage, status, statusAt, onModel, onEffort, onRefreshModels, onPermissionMode, onReadOnly, onBudget, onMaxTurns, onOpenDiagnostics, offline, onPreviewRewind, onRewind, onAddPin, onRemovePin, onSearch,
 }: {
   s: SessionState;
   chat: ChatState;
@@ -45,6 +45,8 @@ export function SessionScreen({
   models: ModelRow[] | null;
   usage: UsageSummary | null;
   status: ChatStatus | null;
+  /** When the status above was last read — the age an offline figure shows. */
+  statusAt: number | null;
   onModel: (m: string) => void;
   onEffort: (e: string | null) => void;
   onRefreshModels: () => void;
@@ -54,6 +56,8 @@ export function SessionScreen({
   onMaxTurns: (t: number | null) => void;
   /** Opens Settings on Diagnostics — what a hook Notice row points at. */
   onOpenDiagnostics: () => void;
+  /** The socket is down but the session is alive on the server. */
+  offline: boolean;
   onPreviewRewind: (uuid: string) => Promise<RewindResult>;
   onRewind: (uuid: string) => Promise<RewindResult>;
   onAddPin: (icon: string, label: string) => void;
@@ -85,7 +89,8 @@ export function SessionScreen({
 
         <EfficiencyPanel usage={usage} cavemanSavings={cavemanSavings} costsAreReal={status?.costsAreReal ?? false} />
 
-        <ContextMeter context={status?.context ?? null} limits={chat.limits} cold={!status} />
+        <ContextMeter context={status?.context ?? null} limits={chat.limits} cold={!status}
+          offline={offline} readAt={statusAt} />
 
         <HookLiveness hooks={chat.hooks} />
 
@@ -178,12 +183,22 @@ export function SessionScreen({
               {fmtTokens(chat.thinkingTokens)}
             </span>
           )}
-          {chat.busy && (
+          {/* One amber chip, one sentence — not a re-tinted screen (49b). */}
+          {offline && (
+            <span className="di-mono" style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 22, padding: "0 10px", borderRadius: 999, background: "#1a1206", border: "1px solid #5a3316", fontSize: 10.5, color: "var(--di-warn)" }}>
+              <Icon name="cloud-off" size={11} color="var(--di-warn)" />Reconnecting
+            </span>
+          )}
+          {chat.busy && !offline && (
             <button className="di-btn" onClick={onInterrupt} style={{ display: "inline-flex", alignItems: "center", gap: 5, height: 22, padding: "0 9px", borderRadius: 999, background: "#132018", border: "1px solid #23402e", fontSize: 10.5, color: "#5fbf7f", cursor: "pointer" }}>
               <span style={{ width: 6, height: 6, borderRadius: 999, background: "#5fbf7f", animation: "di-pulse 1.4s infinite" }} />working · stop
             </button>
           )}
           <span style={{ flex: 1 }} />
+          {/* Offline dims the controls rather than removing them, so nothing
+              you press is silently dropped (49b). */}
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 9,
+            opacity: offline ? 0.45 : 1, pointerEvents: offline ? "none" : undefined }}>
           {/* how much the agent may do without asking — the leash */}
           <LeashPill
             mode={chat.permissionMode}
@@ -201,6 +216,7 @@ export function SessionScreen({
           {/* Model and effort are ONE chip. Merging them is what makes the
               header fit — five controls do not survive a 390px row (43c). */}
           <RunChip models={models} chat={chat} onModel={onModel} onEffort={onEffort} onRefreshModels={onRefreshModels} />
+          </span>
         </div>
 
         {claudeConnected === false
@@ -797,15 +813,34 @@ const CAT_TINTS = ["#9ab1f2", "#7d6ef0", "#39d3ba", "#f8bd5e", "#f0926e", "#6eee
  * counterfactual anywhere in the SDK for what a turn would have cost without
  * caveman, so we show what the window actually holds.
  */
-function ContextMeter({ context, limits, cold }: {
+function ContextMeter({ context, limits, cold, offline, readAt }: {
   context: ChatStatus["context"]; limits: ChatState["limits"]; cold: boolean;
+  /** Offline FREEZES the last figure, desaturated and timestamped — a stale
+   *  number with its age beats no number, as long as nothing pretends to be
+   *  current (49b). */
+  offline: boolean;
+  readAt: number | null;
 }) {
   const pct = context ? Math.min(100, Math.round(context.percentage)) : 0;
   const near = !!context && pct >= 85;
   const cats = (context?.categories ?? []).filter((c) => c.tokens > 0).sort((a, b) => b.tokens - a.tokens);
   const total = cats.reduce((a, c) => a + c.tokens, 0) || 1;
 
-  return (
+  // Offline never re-tints the whole screen: it desaturates the live figure,
+  // stops the animation, and says how old it is.
+  const frozen = offline && !!context;
+  const wrap = (node: React.ReactNode) => (
+    <div style={frozen ? { filter: "saturate(.35)", opacity: 0.75 } : undefined}>
+      {node}
+      {frozen && readAt && (
+        <div className="di-mono" style={{ fontSize: 9.5, color: "#6f8296", padding: "0 2px 10px", marginTop: -6 }}>
+          last read {new Date(readAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · {ago(readAt)}
+        </div>
+      )}
+    </div>
+  );
+
+  return wrap(
     <>
       {/* Above 85% the panel CHANGES REGISTER rather than growing a badge —
           compaction is where an agent quietly forgets what you told it. */}
@@ -904,7 +939,7 @@ function ContextMeter({ context, limits, cold }: {
           </div>
         </div>
       )}
-    </>
+    </>,
   );
 }
 

@@ -29,7 +29,9 @@ function InFlight({ live }: { live: LiveTask[] }) {
       {running.length === 0 ? (
         /* The structure stays when nothing is running, so the boundary between
            the two registers is learned before it is needed (49d). */
-        <div style={{ fontSize: 11, color: "#6f8296", padding: "2px 2px 4px" }}>Nothing running right now.</div>
+        <div style={{ fontSize: 11, color: "#6f8296", padding: "2px 2px 4px", lineHeight: 1.5 }}>
+          The agent isn't running anything. This section fills itself when it starts a subagent or a background command.
+        </div>
       ) : (
         running.slice(-8).reverse().map((t) => (
           <div key={t.id} style={{ display: "flex", alignItems: "flex-start", gap: 9, padding: "5px 2px" }}>

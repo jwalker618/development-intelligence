@@ -73,11 +73,30 @@ export function ChangesScreen({
             {[40, 92, 86, 70, 30, 88, 64].map((w, i) => <div key={i} style={{ width: `${w}%`, height: 12, borderRadius: 6, background: "#12283f", opacity: 0.6, animation: "di-pulse 1.6s infinite", marginBottom: i === 4 ? 26 : 12 }} />)}
           </div>
         ) : clean ? (
+          /* With several repos mounted, "no changes" is only trustworthy if it
+             says what it looked at — so the empty NAMES every checkout (49d). */
           <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 40px" }}>
-            <div style={{ maxWidth: 420, textAlign: "center" }}>
+            <div style={{ maxWidth: 460, textAlign: "center" }}>
               <div style={{ width: 60, height: 60, margin: "0 auto 18px", borderRadius: 15, background: "#0e2233", border: "1px solid var(--di-rule)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="check-check" size={27} color="var(--di-info)" /></div>
               <div style={{ fontSize: 18, fontWeight: 600, color: "var(--di-ink)", letterSpacing: "-0.01em", marginBottom: 8 }}>Nothing to review</div>
-              <div style={{ fontSize: 13, color: "var(--di-ink-mute)", lineHeight: 1.55 }}>The working tree matches HEAD. When Claude edits files, they queue here for you to keep, revert, or tighten.</div>
+              <div style={{ fontSize: 13, color: "var(--di-ink-mute)", lineHeight: 1.55, marginBottom: repos.length > 1 ? 18 : 0 }}>
+                {repos.length > 1
+                  ? `All ${repos.length} checkouts are clean and match their remotes.`
+                  : "The working tree matches HEAD. When Claude edits files, they queue here for you to keep, revert, or tighten."}
+              </div>
+              {repos.length > 1 && (
+                <div style={{ border: "1px solid var(--di-rule)", borderRadius: 11, background: "var(--di-surface)", overflow: "hidden", textAlign: "left" }}>
+                  {repos.map((r, i) => (
+                    <div key={r.name} style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 12px", borderTop: i ? "1px solid #14283c" : 0 }}>
+                      <Icon name={i === 0 ? "square-terminal" : "git-branch"} size={12} color="#3e5670" />
+                      <span className="di-mono" style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--di-ink-soft)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {r.name} · {r.branch ?? "default"}
+                      </span>
+                      <span className="di-mono" style={{ flex: "0 0 auto", fontSize: 10.5, color: "var(--di-pos)" }}>clean</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         ) : !activeDiff ? (
