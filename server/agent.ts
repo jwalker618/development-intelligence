@@ -1,15 +1,23 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
   query,
   type EffortLevel,
+  type ModelInfo,
   type PermissionResult,
+  type PermissionMode,
   type PermissionUpdate,
   type Query,
+  type RewindFilesResult,
+  type SDKPartialAssistantMessage,
+  type SDKSystemMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { WebSocket } from "ws";
+import { cavemanStatus } from "./caveman.js";
 import { sessionEnv, type GrottoConfig } from "./config.js";
+import { UsageLedger, turnFromResult } from "./usage.js";
 
 // ── Native agent chat ───────────────────────────────────────────────────────
 // The phone never sees Claude Code's full-screen TUI again: the server drives
@@ -27,8 +35,15 @@ export type ChatEventKind =
   | "tool_done" // tool result {toolUseId, ok, output}
   | "approval" // permission ask {id, title, displayName, toolName, input}
   | "approval_done" // {id, decision}
+  | "denied" // auto-denied without asking us {toolName, why, message}
+  | "notice" // banner from the loop: hook block reason, status line {text, level}
+  | "compacted" // context was compacted {trigger, preTokens, postTokens}
+  | "rewound" // files restored to a previous turn {uuid, files, insertions, deletions}
   | "result" // turn finished {ok, costUsd, durationMs}
   | "error"; // {message}
+
+/** 'stop' denies AND interrupts the turn; 'allow' may carry an edited input. */
+export type ApprovalDecision = "allow" | "always" | "deny" | "stop";
 
 export interface ChatEvent {
   seq: number;
@@ -41,10 +56,94 @@ interface ChatMeta {
   claudeSessionId?: string;
   model?: string;
   effort?: EffortLevel;
+  /** How long the agent's leash is. Persisted so a reconnect doesn't quietly
+   *  hand a pocketed phone a different posture than the one it was left in. */
+  permissionMode?: PermissionMode;
+  /** Structural read-only posture — see `disallowedTools`. */
+  denyTools?: string[];
+  /** Runaway-loop brake, orthogonal to cost. Unset by default. */
+  maxTurns?: number;
+  /** Hard spend ceiling in USD. The one control that makes an unattended
+   *  phone-away run defensible. Meaningless on subscription auth — see
+   *  `costsAreReal` before showing it. */
+  budgetUsd?: number;
 }
+
+/** The permission modes DI offers. `bypassPermissions` is deliberately absent:
+ *  a review-first IDE has no legitimate use for a mode that removes the human,
+ *  and the session is locked out of it via `disableBypassPermissionsMode`. */
+export const PERMISSION_MODES = ["default", "acceptEdits", "plan", "dontAsk"] as const;
+export type DiPermissionMode = (typeof PERMISSION_MODES)[number];
+
+/** Tools that cannot change anything. Auto-approved so the reviewer is
+ *  interrupted only for state changes; each still renders a tool card. */
+const READ_ONLY_TOOLS = ["Read", "Grep", "Glob", "NotebookRead", "TodoWrite"];
+
+/** Everything that can mutate the workspace or the outside world. A session
+ *  opened read-only is STRUCTURALLY incapable of these, not merely told not to. */
+export const MUTATING_TOOLS = ["Write", "Edit", "NotebookEdit", "Bash", "BashOutput", "KillShell"];
+
+const PLAN_INSTRUCTIONS =
+  "Write the plan as at most 7 numbered steps. Name every file you will create, " +
+  "edit or delete, with its path. State anything you are unsure about as an open " +
+  "question rather than assuming. Do not write code in the plan.";
 
 const HISTORY_LIMIT = 800; // events replayed to a connecting client
 const OUTPUT_CAP = 6000; // chars of tool output persisted per event
+const HOOK_RUNS = 40; // hook results retained for the liveness chip
+const STDERR_LINES = 200; // CLI stderr retained for Diagnostics
+
+/** Where a turn lands when the chosen model is unavailable. Cheap and always
+ *  present, so a long unattended run degrades rather than dying. */
+const FALLBACK_MODEL = "claude-sonnet-4-5";
+
+/** What the CLI told us about ITSELF at init — inventories the UI would
+ *  otherwise have to hardcode. Free: it all arrives on a message we already
+ *  receive. Everything here is CLI-authored, so it is display-only. */
+export interface SessionSignals {
+  /** Real slash commands with their descriptions — what the suggestion chips
+   *  are built from instead of a hardcoded trio. */
+  commands: SlashCommandInfo[];
+  skills: string[];
+  agents: string[];
+  tools: string[];
+  plugins: Array<{ name: string; version?: string }>;
+  mcpServers: Array<{ name: string; status: string }>;
+  betas: string[];
+  outputStyle: string | null;
+  permissionMode: string | null;
+  apiKeySource: string | null;
+  cliVersion: string | null;
+}
+
+/** An agent-initiated task in flight (a subagent, a background command).
+ *  Live only — never persisted, so ⌘K is not flooded with progress ticks. */
+export interface LiveTask {
+  id: string;
+  label: string;
+  status: string;
+  detail: string | null;
+  at: number;
+}
+
+/** One settings-file hook execution. The honest answer to "did caveman fire on
+ *  this turn?" — a boolean per run, never a synthesised percentage. */
+export interface HookRun {
+  at: number;
+  name: string;
+  event: string;
+  outcome: "success" | "error" | "cancelled";
+  exitCode: number | null;
+}
+
+/** A slash command as the CLI describes it. `argumentHint` is shown verbatim
+ *  when present ("<file>") so a chip never implies a bare command works. */
+export interface SlashCommandInfo { name: string; description: string; argumentHint?: string }
+
+const emptySignals = (): SessionSignals => ({
+  commands: [], skills: [], agents: [], tools: [], plugins: [], mcpServers: [],
+  betas: [], outputStyle: null, permissionMode: null, apiKeySource: null, cliVersion: null,
+});
 
 function summarize(name: string, input: Record<string, unknown>): string {
   const s =
@@ -52,6 +151,44 @@ function summarize(name: string, input: Record<string, unknown>): string {
   if (typeof s === "string") return s.length > 120 ? s.slice(0, 117) + "…" : s;
   if (name === "TodoWrite") return "update plan";
   return "";
+}
+
+/**
+ * The model that did most of the work this turn, from `modelUsage`. This is
+ * how a `fallbackModel` substitution becomes visible: we read what ran rather
+ * than assuming the requested model ran. Returns null when the SDK gave us no
+ * per-model breakdown.
+ */
+function dominantModel(msg: Record<string, unknown>): string | null {
+  const usage = msg.modelUsage;
+  if (!usage || typeof usage !== "object") return null;
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  let best: string | null = null;
+  let bestOut = -1;
+  for (const [model, u] of Object.entries(usage as Record<string, unknown>)) {
+    const o = (u ?? {}) as Record<string, unknown>;
+    // Rank on OUTPUT only. Input and cache-read are dominated by whichever
+    // model happened to carry the big cached prefix — measured live, that made
+    // a background haiku call outrank the model that actually wrote the reply.
+    const out = n(o.outputTokens);
+    if (out > bestOut) { bestOut = out; best = model; }
+  }
+  return best;
+}
+
+/** Normalise a command list from either shape the CLI uses: bare strings on
+ *  `system/init`, full objects from `supportedCommands()`. */
+function toCommands(xs: unknown[]): SlashCommandInfo[] {
+  return xs
+    .map((x) => {
+      if (typeof x === "string") return { name: x, description: "" };
+      const o = (x ?? {}) as Record<string, unknown>;
+      const name = String(o.name ?? "");
+      return name
+        ? { name, description: String(o.description ?? ""), ...(o.argumentHint ? { argumentHint: String(o.argumentHint) } : {}) }
+        : null;
+    })
+    .filter((c): c is SlashCommandInfo => !!c);
 }
 
 function blockText(content: unknown): string {
@@ -64,13 +201,35 @@ function blockText(content: unknown): string {
   return "";
 }
 
+/** The slice of a Session the agent needs. Structural, so a Session satisfies
+ *  it directly and `extraDirs` stays LIVE — adding a repo mid-session changes
+ *  what the next query sees without re-registering the chat. */
+export interface Workspace {
+  readonly id: string;
+  /** Primary checkout — the agent's cwd. */
+  readonly dir: string;
+  /** Secondary checkouts, handed to the SDK as additionalDirectories. */
+  readonly extraDirs: string[];
+}
+
 /** One headless Claude Code conversation, bound to a session workspace. */
 export class AgentChat {
   private events: ChatEvent[] = [];
   private seq = 0;
   private clients = new Set<WebSocket>();
   private q: Query | null = null;
-  private inputWaiters: Array<(m: SDKUserMessage) => void> = [];
+  /**
+   * Input queue, generation-tagged.
+   *
+   * The prompt generator lives inside the query, but the queue it pulls from
+   * lives on the chat. When a query is recycled the OLD generator is still
+   * parked on `nextInput()` holding a waiter — so the next message was handed
+   * to a process that had already been closed, and the turn silently hung.
+   * Bumping `epoch` retires those waiters with `null`, which ends the old
+   * generator cleanly and lets the live one take the message.
+   */
+  private epoch = 0;
+  private inputWaiters: Array<(m: SDKUserMessage | null) => void> = [];
   private inputBacklog: SDKUserMessage[] = [];
   private pending: {
     id: string;
@@ -81,12 +240,37 @@ export class AgentChat {
   } | null = null;
   private meta: ChatMeta = {};
   private busy = false;
+  /** Model the CLI resolved for the current run. NOT persisted: writing it into
+   *  meta permanently version-pins a session the user never configured, so a
+   *  "Default" session would silently stick to whatever was newest that day. */
+  private active: string | null = null;
+  /** CLI-reported inventories, refreshed on every init. */
+  private signals: SessionSignals = emptySignals();
+  /** Bounded ring of settings-file hook results — caveman/RTK liveness. */
+  private hookRuns: HookRun[] = [];
+  /** Agent-initiated tasks currently known to the CLI. */
+  private tasks = new Map<string, LiveTask>();
+  /** The CLI's own idea of what it is doing. When present it OUTRANKS our
+   *  inference: six inference sites is how stuck spinners happen. */
+  private cliState: "idle" | "running" | "requires_action" | null = null;
+  /** Bounded ring of CLI stderr lines, for Settings → Diagnostics. */
+  private stderrRing: string[] = [];
+  /** Last plan rate-limit push. Subscription auth only; null elsewhere. */
+  private rateLimit: Record<string, unknown> | null = null;
+  /** Cached account identity — one control request per query lifetime. */
+  private accountCache: Record<string, unknown> | null = null;
+  /** Live reasoning-token estimate for the turn in flight. */
+  private thinkingTokens = 0;
+  /** The model's own suggested follow-up, if it offered one. */
+  private suggestion: string | null = null;
+
+  private ledger: UsageLedger;
 
   constructor(
     private cfg: GrottoConfig,
-    readonly sessionId: string,
-    private dir: string,
+    private ws: Workspace,
   ) {
+    this.ledger = new UsageLedger(cfg);
     fs.mkdirSync(this.chatDir, { recursive: true });
     this.load();
   }
@@ -95,10 +279,10 @@ export class AgentChat {
     return path.join(this.cfg.home, "chat");
   }
   private get logPath(): string {
-    return path.join(this.chatDir, `${this.sessionId}.jsonl`);
+    return path.join(this.chatDir, `${this.ws.id}.jsonl`);
   }
   private get metaPath(): string {
-    return path.join(this.chatDir, `${this.sessionId}.meta.json`);
+    return path.join(this.chatDir, `${this.ws.id}.meta.json`);
   }
 
   private load(): void {
@@ -147,8 +331,15 @@ export class AgentChat {
   }
 
   private setBusy(busy: boolean): void {
+    if (this.busy === busy) return;
     this.busy = busy;
     this.broadcast({ t: "status", busy });
+  }
+
+  /** Busy inferred from the message stream. Ignored once the CLI has told us
+   *  its own state — mixing the two is what produced stuck spinners. */
+  private inferBusy(busy: boolean): void {
+    if (this.cliState === null) this.setBusy(busy);
   }
 
   private lastApprovalEvent(): ChatEvent | null {
@@ -167,8 +358,12 @@ export class AgentChat {
         events: this.events,
         busy: this.busy,
         model: this.meta.model ?? null,
+        activeModel: this.active,
         effort: this.meta.effort ?? null,
         pendingApproval: this.pending ? this.lastApprovalEvent() : null,
+        signals: this.signals,
+        hooks: this.hookRuns,
+        tasks: [...this.tasks.values()],
       }),
     );
     ws.on("close", () => this.clients.delete(ws));
@@ -188,17 +383,42 @@ export class AgentChat {
     return this.meta.model ?? null;
   }
 
+  /** The model the CLI actually resolved for this session (may differ from the
+   *  user's choice, e.g. when they left it on Default). */
+  get activeModel(): string | null {
+    return this.active;
+  }
+
+  /** Live catalog off the running query — free, it reuses the cached init
+   *  result. Null when no conversation is running. */
+  supportedModels(): Promise<ModelInfo[]> | null {
+    return this.q ? this.q.supportedModels() : null;
+  }
+
   send(text: string): void {
-    this.emit("user", { text });
+    // MEASURED: the CLI never echoes the user's own text message back, so the
+    // only rewind anchor is one we stamp ourselves. Without it every
+    // rewindFiles() call answers "No file checkpoint found for this message."
+    // See docs/SDK_SPIKES.md §1.
+    const uuid = crypto.randomUUID();
+    this.emit("user", { text, uuid });
     const msg: SDKUserMessage = {
       type: "user",
       message: { role: "user", content: [{ type: "text", text }] },
       parent_tool_use_id: null,
-    };
+      uuid,
+    } as SDKUserMessage;
+    // A new turn invalidates the previous turn's ephemerals.
+    this.thinkingTokens = 0;
+    this.suggestion = null;
     this.ensureRunning();
     const waiter = this.inputWaiters.shift();
     if (waiter) waiter(msg);
     else this.inputBacklog.push(msg);
+  }
+
+  usage(): ReturnType<UsageLedger["summarize"]> {
+    return this.ledger.summarize(this.ws.id);
   }
 
   get effort(): EffortLevel | null {
@@ -218,12 +438,59 @@ export class AgentChat {
   async setEffort(effort: EffortLevel | null): Promise<void> {
     this.meta.effort = effort ?? undefined;
     this.saveMeta();
-    if (this.q && !this.busy) {
-      const q = this.q;
-      this.q = null;
-      await q.interrupt().catch(() => undefined);
-    }
+    await this.recycle();
     this.broadcast({ t: "effort", effort });
+  }
+
+  /** Drop an IDLE query so the next turn rebuilds it with current creation-time
+   *  options (effort, additionalDirectories). Resume keeps the conversation, so
+   *  this is invisible to the user. A busy query is left alone — recycling
+   *  mid-turn would lose the in-flight reply. */
+  async recycle(): Promise<void> {
+    if (!this.q || this.busy) return;
+    const q = this.q;
+    this.q = null;
+    // Retire the parked waiter FIRST: leaving it attached to the closing query
+    // is what made the next message vanish into a dead subprocess.
+    this.epoch++;
+    this.retireInputs();
+    // interrupt() ends the TURN; close() ends the PROCESS. Without the close
+    // every recycle leaked a Claude CLI subprocess for the container's lifetime.
+    await q.interrupt().catch(() => undefined);
+    try { await q.close?.(); } catch { /* already gone */ }
+  }
+
+  get permissionMode(): DiPermissionMode {
+    return (this.meta.permissionMode as DiPermissionMode | undefined) ?? "default";
+  }
+
+  /** True when the session was opened (or switched) to read-only review. */
+  get readOnly(): boolean {
+    return !!this.meta.denyTools?.length;
+  }
+
+  /**
+   * Change the leash mid-session. The SDK has a live setter for this, so unlike
+   * effort it does not need a query recycle — the very next tool call obeys.
+   */
+  async setPermissionMode(mode: DiPermissionMode): Promise<void> {
+    this.meta.permissionMode = mode;
+    this.saveMeta();
+    if (this.q) await this.q.setPermissionMode(mode).catch(() => undefined);
+    this.broadcast({ t: "permissionMode", mode });
+  }
+
+  /**
+   * Read-only posture. `disallowedTools` is subtractive and has no
+   * skill-compatibility hazard, unlike restricting `tools` wholesale (which
+   * would remove tools the settings-loaded caveman/RTK skills assume exist).
+   * Creation-time only, so an idle query is recycled to apply it.
+   */
+  async setReadOnly(on: boolean): Promise<void> {
+    this.meta.denyTools = on ? [...MUTATING_TOOLS] : undefined;
+    this.saveMeta();
+    await this.recycle();
+    this.broadcast({ t: "readOnly", readOnly: on });
   }
 
   async interrupt(): Promise<void> {
@@ -233,17 +500,29 @@ export class AgentChat {
     this.setBusy(false);
   }
 
-  resolveApproval(id: string, decision: "allow" | "always" | "deny"): boolean {
+  resolveApproval(
+    id: string,
+    decision: ApprovalDecision,
+    editedInput?: Record<string, unknown>,
+  ): boolean {
     const p = this.pending;
     if (!p || p.id !== id) return false;
     this.pending = null;
-    this.emit("approval_done", { id, decision });
-    if (decision === "deny") {
-      p.resolve({ behavior: "deny", message: "Denied from Grotto." });
+    const edited = decision === "allow" && editedInput ? editedInput : undefined;
+    this.emit("approval_done", { id, decision, edited: !!edited });
+    if (decision === "deny" || decision === "stop") {
+      p.resolve({
+        behavior: "deny",
+        message: decision === "stop" ? "Denied — stop this turn." : "Denied from Grotto.",
+        // 'stop' ends the whole turn instead of letting the agent try again.
+        ...(decision === "stop" ? { interrupt: true } : {}),
+      });
     } else {
       p.resolve({
         behavior: "allow",
-        updatedInput: p.input,
+        // updatedInput is how a reviewer FIXES a bad argument (e.g. a wrong rm
+        // path) instead of denying and re-prompting in prose.
+        updatedInput: edited ?? p.input,
         ...(decision === "always" && p.suggestions?.length
           ? { updatedPermissions: p.suggestions }
           : {}),
@@ -263,18 +542,427 @@ export class AgentChat {
 
   // ── SDK loop ──────────────────────────────────────────────────────────────
 
-  private nextInput(): Promise<SDKUserMessage> {
+  /** Resolves `null` once `epoch` is superseded, ending that generator. */
+  private nextInput(epoch: number): Promise<SDKUserMessage | null> {
+    if (epoch !== this.epoch) return Promise.resolve(null);
     const queued = this.inputBacklog.shift();
     if (queued) return Promise.resolve(queued);
     return new Promise((resolve) => this.inputWaiters.push(resolve));
   }
 
+  /** Release every parked waiter so superseded generators can exit. Queued
+   *  messages stay in the backlog and are picked up by the next query. */
+  private retireInputs(): void {
+    const waiters = this.inputWaiters;
+    this.inputWaiters = [];
+    for (const w of waiters) w(null);
+  }
+
+  /**
+   * Every `type: "system"` subtype the CLI emits. We used to keep only `init`
+   * and drop the rest on the floor, which meant a hook could block a turn, or
+   * a tool could be auto-denied, and the phone would show a prompt that simply
+   * appeared to do nothing.
+   *
+   * Transcript discipline: `emit()` appends to the JSONL that ⌘K indexes, so
+   * only reviewer-relevant events go there. Hook stdout/stderr and inventories
+   * go on `broadcast()` — live, unindexed, and never persisted.
+   */
+  private onSystem(msg: Record<string, unknown> & { subtype?: string }): void {
+    switch (msg.subtype) {
+      case "init": {
+        const m = msg as unknown as SDKSystemMessage;
+        this.meta.claudeSessionId = m.session_id;
+        this.active = m.model;
+        this.saveMeta();
+        this.signals = {
+          // system/init gives names only; hydrateSignals() upgrades these to
+          // full rows via supportedCommands() when the query is warm.
+          commands: (m.slash_commands ?? []).map((name) => ({ name, description: "" })),
+          skills: m.skills ?? [],
+          agents: m.agents ?? [],
+          tools: m.tools ?? [],
+          plugins: (m.plugins ?? []).map((p) => ({ name: p.name, ...(p.version ? { version: p.version } : {}) })),
+          mcpServers: m.mcp_servers ?? [],
+          betas: m.betas ?? [],
+          outputStyle: m.output_style ?? null,
+          permissionMode: m.permissionMode ?? null,
+          apiKeySource: m.apiKeySource ?? null,
+          cliVersion: m.claude_code_version ?? null,
+        };
+        this.emit("init", { model: m.model });
+        this.broadcast({ t: "signals", signals: this.signals });
+        this.setBusy(true);
+        break;
+      }
+
+      // The CLI's own state machine. Ground truth beats inference.
+      case "session_state_changed": {
+        const state = (msg as { state?: string }).state;
+        if (state === "idle" || state === "running" || state === "requires_action") {
+          this.cliState = state;
+          this.setBusy(state !== "idle");
+        }
+        break;
+      }
+
+      // Denied by a rule / classifier / mode — canUseTool was never called, so
+      // without this the agent just looks like it underperformed.
+      case "permission_denied": {
+        const d = msg as { tool_name?: string; decision_reason?: string; decision_reason_type?: string; message?: string };
+        this.emit("denied", {
+          toolName: d.tool_name ?? "tool",
+          why: d.decision_reason ?? d.decision_reason_type ?? "blocked",
+          message: (d.message ?? "").slice(0, 600),
+        });
+        break;
+      }
+
+      // Banners from the loop: hook block reasons, status lines, command output.
+      case "informational": {
+        const i = msg as { content?: string; level?: string; prevent_continuation?: boolean };
+        const level = i.level ?? "info";
+        const text = (i.content ?? "").slice(0, 1200);
+        if (!text) break;
+        // `info` is transcript-mode chatter; anything louder is something the
+        // reviewer is meant to act on, so it earns a durable row.
+        if (level === "info") this.broadcast({ t: "notice", text, level });
+        else this.emit("notice", { text, level, stops: !!i.prevent_continuation });
+        break;
+      }
+
+      // Settings-file hooks — this is how we can say caveman/RTK fired.
+      case "hook_response": {
+        const h = msg as { hook_name?: string; hook_event?: string; outcome?: string; exit_code?: number };
+        const run: HookRun = {
+          at: Date.now(),
+          name: h.hook_name ?? "hook",
+          event: h.hook_event ?? "",
+          outcome: h.outcome === "error" || h.outcome === "cancelled" ? h.outcome : "success",
+          exitCode: typeof h.exit_code === "number" ? h.exit_code : null,
+        };
+        this.hookRuns.push(run);
+        if (this.hookRuns.length > HOOK_RUNS) this.hookRuns.shift();
+        // Never emit(): hook stdout/stderr can carry anything the hook printed.
+        this.broadcast({ t: "hook", run });
+        break;
+      }
+
+      // Compaction silently changes what the agent remembers. Make it visible.
+      case "compact_boundary": {
+        const meta = (msg as { compact_metadata?: { trigger?: string; pre_tokens?: number; post_tokens?: number } }).compact_metadata;
+        this.emit("compacted", {
+          trigger: meta?.trigger ?? "auto",
+          preTokens: meta?.pre_tokens ?? null,
+          postTokens: meta?.post_tokens ?? null,
+        });
+        break;
+      }
+
+      // Agent-initiated work (subagents, background bash). MEASURED as emitted
+      // unconditionally — see docs/SDK_SPIKES.md §7. Live-only: this is a
+      // "what is happening right now" panel, not transcript history, and
+      // persisting every progress tick would flood ⌘K.
+      case "task_started":
+      case "task_progress":
+      case "task_updated":
+      case "task_notification":
+      case "background_tasks_changed": {
+        this.applyTask(msg);
+        this.broadcast({ t: "tasks", tasks: [...this.tasks.values()] });
+        break;
+      }
+
+      // A mid-session push of the command list (skills discovered as the agent
+      // moves around). The docs are explicit: REPLACE, don't merge.
+      case "commands_changed": {
+        const cmds = (msg as { commands?: Array<Record<string, unknown> | string> }).commands;
+        if (Array.isArray(cmds)) {
+          this.signals.commands = toCommands(cmds);
+          this.broadcast({ t: "signals", signals: this.signals });
+        }
+        break;
+      }
+
+      // A live estimate of the current reasoning burn. Ephemeral by design:
+      // it is a "still thinking" signal, not transcript history.
+      case "thinking_tokens": {
+        this.thinkingTokens = Number((msg as { estimated_tokens?: number }).estimated_tokens ?? 0);
+        this.broadcast({ t: "thinking", tokens: this.thinkingTokens });
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  /**
+   * Partial-message stream events.
+   *
+   * Text deltas drive the streaming bubble. `content_block_start` for a
+   * tool_use is the one that matters for perceived latency: it fires the
+   * moment the model begins emitting the call, seconds before the block
+   * completes and the durable `tool` event lands. The provisional card is
+   * keyed by the SAME toolUseId the durable event carries, so the client
+   * REPLACES rather than appends — the identity trap that made streamed text
+   * render twice applies here too, and is solved the same way.
+   */
+  private onStream(ev: SDKPartialAssistantMessage["event"]): void {
+    switch (ev.type) {
+      case "content_block_delta":
+        if (ev.delta.type === "text_delta") this.broadcast({ t: "delta", text: ev.delta.text });
+        break;
+      case "content_block_start":
+        if (ev.content_block.type === "tool_use") {
+          this.broadcast({ t: "tool_start", toolUseId: ev.content_block.id, name: ev.content_block.name });
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  /**
+   * Fold one task lifecycle message into the live task table.
+   *
+   * The CLI's field names differ per subtype and are not a tidy union, so this
+   * reads defensively and keeps whatever it can identify. An unnameable task
+   * is skipped rather than shown as "undefined".
+   */
+  private applyTask(msg: Record<string, unknown>): void {
+    const m = msg as {
+      subtype?: string; task_id?: string; id?: string; taskId?: string;
+      description?: string; prompt?: string; status?: string; message?: string;
+      tasks?: Array<Record<string, unknown>>;
+    };
+    // background_tasks_changed carries the whole list — treat it as truth.
+    if (Array.isArray(m.tasks)) {
+      this.tasks.clear();
+      for (const t of m.tasks) {
+        const id = String(t.task_id ?? t.id ?? "");
+        if (!id) continue;
+        this.tasks.set(id, {
+          id,
+          label: String(t.description ?? t.prompt ?? "task").slice(0, 140),
+          status: String(t.status ?? "running"),
+          detail: null,
+          at: Date.now(),
+        });
+      }
+      return;
+    }
+    const id = String(m.task_id ?? m.taskId ?? m.id ?? "");
+    if (!id) return;
+    const prev = this.tasks.get(id);
+    const done = m.subtype === "task_updated" && /complete|done|finish|fail/i.test(String(m.status ?? ""));
+    this.tasks.set(id, {
+      id,
+      label: String(m.description ?? m.prompt ?? prev?.label ?? "task").slice(0, 140),
+      status: String(m.status ?? (done ? "done" : prev?.status ?? "running")),
+      detail: m.message ? String(m.message).slice(0, 200) : prev?.detail ?? null,
+      at: Date.now(),
+    });
+    // Keep the table bounded; a long session can dispatch many subagents.
+    if (this.tasks.size > 40) {
+      const oldest = [...this.tasks.values()].sort((a, b) => a.at - b.at)[0];
+      if (oldest) this.tasks.delete(oldest.id);
+    }
+  }
+
+  /** Live CLI inventories + hook liveness, for the client and the API. */
+  status(): {
+    signals: SessionSignals; hooks: HookRun[]; cliState: string | null;
+    tasks: LiveTask[]; thinkingTokens: number; suggestion: string | null; maxTurns: number | null;
+  } {
+    return {
+      signals: this.signals, hooks: this.hookRuns, cliState: this.cliState,
+      tasks: [...this.tasks.values()], thinkingTokens: this.thinkingTokens,
+      suggestion: this.suggestion, maxTurns: this.meta.maxTurns ?? null,
+    };
+  }
+
+  /** Runaway-loop brake. Orthogonal to cost: a cheap model can loop a long
+   *  time for very little money while producing enormous review churn. */
+  async setMaxTurns(turns: number | null): Promise<void> {
+    this.meta.maxTurns = turns && turns > 0 ? Math.floor(turns) : undefined;
+    this.saveMeta();
+    await this.recycle();
+    this.broadcast({ t: "maxTurns", maxTurns: this.meta.maxTurns ?? null });
+  }
+
+  /**
+   * Fill the inventories from a control request rather than waiting for the
+   * `system/init` message.
+   *
+   * Measured, not assumed: the CLI does NOT emit `system/init` until the first
+   * user message, so a freshly warmed session has empty inventories. This is
+   * the only source for command/agent lists before turn one — which is exactly
+   * when a new user is looking at the screen.
+   */
+  async hydrateSignals(): Promise<void> {
+    if (!this.q) return;
+    const init = await this.q.initializationResult().catch(() => null);
+    if (!init) return;
+    const named = (xs: unknown): string[] =>
+      Array.isArray(xs)
+        ? xs.map((x) => (typeof x === "string" ? x : String((x as { name?: string })?.name ?? ""))).filter(Boolean)
+        : [];
+    // supportedCommands() is the only source with descriptions; the init
+    // message carries bare names.
+    if (init.commands?.length) this.signals.commands = toCommands(init.commands as unknown[]);
+    if (init.agents?.length) this.signals.agents = named(init.agents);
+    if (init.output_style) this.signals.outputStyle = init.output_style;
+    if (init.account) this.accountCache = init.account as Record<string, unknown>;
+    this.broadcast({ t: "signals", signals: this.signals });
+  }
+
+  /**
+   * Start the CLI without sending a message.
+   *
+   * Every control request below — context meter, model catalog, account,
+   * MCP status — has NO data source until a query exists. Without warming,
+   * the meter is blank at exactly the moment a new user first looks at it.
+   * Deliberately does not set busy: nothing is running yet.
+   */
+  warm(): void {
+    this.ensureRunning();
+  }
+
+  /** Live context-window accounting: what the prompt is actually made of.
+   *  Null when no query is running (call warm() first). */
+  async contextUsage(): Promise<unknown | null> {
+    if (!this.q) return null;
+    return this.q.getContextUsage().catch(() => null);
+  }
+
+  /** Who the tool calls are being made as. Cached — the identity does not
+   *  change within a query lifetime, and this is on the Settings render path. */
+  async account(): Promise<Record<string, unknown> | null> {
+    if (this.accountCache) return this.accountCache;
+    if (!this.q) return null;
+    const info = await this.q.accountInfo().catch(() => null);
+    if (info) this.accountCache = info as Record<string, unknown>;
+    return this.accountCache;
+  }
+
+  /**
+   * Dollar figures are meaningless on subscription auth (`total_cost_usd` is
+   * computed as if the tokens had been billed at API rates) and on 3P
+   * providers. Gate every cost tile on this rather than rendering a number the
+   * user has no way to reconcile with their bill.
+   */
+  costsAreReal(): boolean {
+    const acct = this.accountCache;
+    // No account yet — say no rather than showing a ceiling we may have to
+    // withdraw a second later.
+    if (!acct) return false;
+    if (acct.apiProvider && acct.apiProvider !== "firstParty") return false;
+    if (acct.subscriptionType) return false;
+    // An OAuth credential IS a subscription login even when the CLI does not
+    // name the plan: measured live, a working Max session reports only
+    // `tokenSource: CLAUDE_CODE_OAUTH_TOKEN_*` with no subscriptionType, and
+    // treating the missing field as "billed per token" put a dollar ceiling on
+    // a session whose dollars are notional.
+    const source = String(acct.tokenSource ?? "");
+    if (/oauth/i.test(source)) return false;
+    return true;
+  }
+
+  /** Has the CLI actually authenticated? The stored-token check the front door
+   *  uses is a proxy; this is the fact. */
+  authenticated(): boolean {
+    return this.accountCache !== null;
+  }
+
+  /** Plan rate-limit window, when the CLI has pushed one. */
+  limits(): Record<string, unknown> | null {
+    return this.rateLimit;
+  }
+
+  /** Bounded CLI stderr for Diagnostics. */
+  stderrTail(): string[] {
+    return [...this.stderrRing];
+  }
+
+  get budgetUsd(): number | null {
+    return this.meta.budgetUsd ?? null;
+  }
+
+  /**
+   * Undo everything the agent changed on disk since a given user message.
+   *
+   * DI's one real undo. `dryRun` answers "what would this restore?" so the
+   * reviewer confirms against a file count and a line delta rather than a
+   * promise. Measured to survive a query recycle and `resume` — see
+   * docs/SDK_SPIKES.md §2.
+   *
+   * Deliberately NOT wired to per-hunk Revert: this reverts every file the
+   * agent touched since that message, so a button labelled "Revert" on one
+   * hunk row would silently discard the reviewer's other same-turn edits.
+   *
+   * The transcript does NOT rewind with the files — there is no counterpart in
+   * the SDK — so a real rewind leaves a durable marker saying exactly that.
+   */
+  async rewind(uuid: string, dryRun: boolean): Promise<RewindFilesResult> {
+    if (!this.q) {
+      // A cold session has no CLI process; warm it so the checkpoint store is
+      // reachable, rather than reporting "cannot rewind" for something we can.
+      this.warm();
+    }
+    if (!this.q) return { canRewind: false, error: "Claude Code is not running" } as RewindFilesResult;
+    const call = (dry: boolean) =>
+      this.q!.rewindFiles(uuid, { dryRun: dry }).catch((e: unknown) => ({
+        canRewind: false,
+        error: e instanceof Error ? e.message : String(e),
+      }) as RewindFilesResult);
+
+    if (dryRun) return call(true);
+
+    // MEASURED: the real rewind's response carries only `skippedLinks` — no
+    // file list, no line counts. Taking the stats from it produced a receipt
+    // that read "0 files restored · +0 −0" for a rewind that restored a file.
+    // A dry run immediately beforehand is one cheap control request and makes
+    // the receipt true.
+    const preview = await call(true);
+    const res = await call(false);
+    if (res.canRewind) {
+      this.emit("rewound", {
+        uuid,
+        files: preview.filesChanged?.length ?? 0,
+        insertions: preview.insertions ?? 0,
+        deletions: preview.deletions ?? 0,
+      });
+    }
+    // Hand the caller the stats too, so the client never has to guess either.
+    return { ...preview, ...res } as RewindFilesResult;
+  }
+
+  /**
+   * Hard spend ceiling. Creation-time, so an idle query is recycled. A breached
+   * session re-breaches on the very next message with the same cap, which is
+   * why the client's stop card offers "raise budget" rather than only "resume".
+   */
+  async setBudget(usd: number | null): Promise<void> {
+    this.meta.budgetUsd = usd && usd > 0 ? usd : undefined;
+    this.saveMeta();
+    await this.recycle();
+    this.broadcast({ t: "budget", budgetUsd: this.meta.budgetUsd ?? null });
+  }
+
   private ensureRunning(): void {
     if (this.q) return;
 
+    const epoch = ++this.epoch;
+    this.retireInputs();
+
     const self = this;
     async function* inputs(): AsyncIterable<SDKUserMessage> {
-      for (;;) yield await self.nextInput();
+      for (;;) {
+        const msg = await self.nextInput(epoch);
+        if (msg === null) return; // superseded by a newer query
+        yield msg;
+      }
     }
 
     const env: Record<string, string | undefined> = { ...sessionEnv(this.cfg) };
@@ -282,16 +970,64 @@ export class AgentChat {
     const q = query({
       prompt: inputs(),
       options: {
-        cwd: this.dir,
+        cwd: this.ws.dir,
+        // Multi-repo: the agent can read and edit every checkout in the session,
+        // not just its cwd. Snapshotted at query build — see recycle().
+        ...(this.ws.extraDirs.length ? { additionalDirectories: [...this.ws.extraDirs] } : {}),
         env,
         resume: this.meta.claudeSessionId,
         model: this.meta.model,
         ...(this.meta.effort ? { effort: this.meta.effort } : {}),
         // Load the user's CLAUDE_CONFIG_DIR settings + the repo's CLAUDE.md —
         // this is what keeps caveman hooks and RTK in the loop headlessly.
+        //
+        // 'local' is DELIBERATELY omitted. Adding it would execute a freshly
+        // cloned repo's .claude/settings.local.json hooks, permissions and
+        // enabled plugins — and DI's whole loop is "clone a repo you are about
+        // to review". The cost is that a rule a user set locally in their
+        // terminal will not apply here; Settings → Diagnostics says so, so it
+        // reads as a stated choice rather than a mystery divergence.
         settingSources: ["user", "project"],
+        // Hook events let us show whether caveman / RTK actually fired for a
+        // turn — a real liveness signal instead of assuming they are working.
+        includeHookEvents: true,
         includePartialMessages: true,
-        permissionMode: "default",
+        // Read-only tools never mutate anything, and every one of them still
+        // renders a tool card, so the transcript stays complete. Approving them
+        // one at a time was pure approval fatigue.
+        allowedTools: READ_ONLY_TOOLS,
+        ...(this.meta.denyTools?.length ? { disallowedTools: this.meta.denyTools } : {}),
+        // A cloned repo's .mcp.json must not auto-connect with no operator
+        // involvement. DI passes no mcpServers, so this costs nothing today and
+        // closes the hole the day it does.
+        strictMcpConfig: true,
+        settings: JSON.stringify({
+          // A hostile repo — or a future bug in DI — must not be able to
+          // escalate a session out of human review.
+          permissions: { disableBypassPermissionsMode: "disable" },
+        }),
+        // Inert unless plan mode is on; ready the moment it is.
+        planModeInstructions: PLAN_INSTRUCTIONS,
+        ...(this.meta.maxTurns ? { maxTurns: this.meta.maxTurns } : {}),
+        // One model-authored follow-up chip after a turn. Honest scope: the CLI
+        // suppresses suggestions on turn one, which is exactly when the
+        // hardcoded starter chips render — cold start is unchanged.
+        promptSuggestions: true,
+        ...(this.meta.budgetUsd ? { maxBudgetUsd: this.meta.budgetUsd } : {}),
+        // Undo over agent edits. Anchored to the uuid we stamp in send().
+        enableFileCheckpointing: true,
+        // Degrade instead of failing the turn — but the reviewer is TOLD which
+        // model actually ran (see `ranOn` on the result event). Under-reviewing
+        // Sonnet output believing it came from Opus is a review-integrity bug,
+        // so the disclosure ships with the feature, not after it.
+        fallbackModel: FALLBACK_MODEL,
+        // The CLI's own stderr, bounded. Without this, a misbehaving session
+        // gives Diagnostics nothing to show.
+        stderr: (line: string) => {
+          this.stderrRing.push(line.slice(0, 2000));
+          if (this.stderrRing.length > STDERR_LINES) this.stderrRing.shift();
+        },
+        permissionMode: this.meta.permissionMode ?? "default",
         canUseTool: async (toolName, input, opts) => {
           // One ask at a time (matches Claude Code's own serial prompts).
           const result = new Promise<PermissionResult>((resolve) => {
@@ -303,11 +1039,20 @@ export class AgentChat {
               suggestions: opts.suggestions,
             };
           });
+          // Surface the FULL context the SDK gives us. Previously we kept only
+          // title/displayName, so the reviewer had to infer blast radius from a
+          // raw input blob.
           this.emit("approval", {
             id: opts.requestId,
             toolName,
             title: opts.title ?? `Claude wants to use ${toolName}`,
             displayName: opts.displayName ?? toolName,
+            description: opts.description ?? null,   // blast radius, in prose
+            blockedPath: opts.blockedPath ?? null,   // the path that tripped it
+            decisionReason: opts.decisionReason ?? null, // WHY it was asked
+            agentID: opts.agentID ?? null,           // non-null => a subagent
+            toolUseId: opts.toolUseID ?? null,
+            canAlways: !!opts.suggestions?.length,
             input,
           });
           opts.signal.addEventListener("abort", () => {
@@ -327,26 +1072,29 @@ export class AgentChat {
         for await (const msg of q) {
           switch (msg.type) {
             case "system":
-              if (msg.subtype === "init") {
-                this.meta.claudeSessionId = msg.session_id;
-                if (!this.meta.model) this.meta.model = msg.model;
-                this.saveMeta();
-                this.emit("init", { model: msg.model });
-                this.setBusy(true);
-              }
+              this.onSystem(msg);
               break;
             case "stream_event": {
-              const ev = msg.event as {
-                type: string;
-                delta?: { type?: string; text?: string };
-              };
-              if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta") {
-                this.broadcast({ t: "delta", text: ev.delta.text ?? "" });
+              this.onStream(msg.event);
+              break;
+            }
+            // A tool that is taking a while. Purely a liveness signal for the
+            // card that is already on screen.
+            case "tool_progress": {
+              const t = msg as unknown as { tool_use_id?: string; elapsed_time_seconds?: number };
+              this.broadcast({ t: "tool_elapsed", toolUseId: t.tool_use_id, seconds: Math.round(t.elapsed_time_seconds ?? 0) });
+              break;
+            }
+            // The model's own one-line account of a run of tool calls.
+            case "tool_use_summary": {
+              const t = msg as unknown as { summary?: string; preceding_tool_use_ids?: string[] };
+              if (t.summary) {
+                this.broadcast({ t: "tool_summary", summary: String(t.summary).slice(0, 300), toolUseIds: t.preceding_tool_use_ids ?? [] });
               }
               break;
             }
             case "assistant": {
-              this.setBusy(true);
+              this.inferBusy(true);
               for (const block of msg.message.content) {
                 if (block.type === "text" && block.text.trim()) {
                   this.emit("text", { text: block.text });
@@ -376,14 +1124,52 @@ export class AgentChat {
               }
               break;
             }
-            case "result":
+            case "result": {
+              // Real per-turn usage, tagged with the caveman mode that was
+              // active — this is what replaces the invented efficiency numbers.
+              const mode = cavemanStatus(this.cfg.claudeConfigDir).mode ?? "off";
+              const turn = turnFromResult(
+                msg as unknown as Record<string, unknown>,
+                mode,
+                this.active ?? this.meta.model ?? null,
+              );
+              this.ledger.record(this.ws.id, turn);
               this.emit("result", {
                 ok: msg.subtype === "success",
+                // Why the turn ENDED — budget breach, max turns, refusal — not
+                // just whether it succeeded.
+                reason: msg.subtype,
                 costUsd: "total_cost_usd" in msg ? msg.total_cost_usd : null,
                 durationMs: msg.duration_ms,
+                inputTokens: turn.inputTokens,
+                outputTokens: turn.outputTokens,
+                cacheReadTokens: turn.cacheReadTokens,
+                // Which model ACTUALLY ran. Derived from the dominant
+                // modelUsage key, never by set-membership against meta.model —
+                // a fallback must be visible, not inferred from absence.
+                ranOn: dominantModel(msg as unknown as Record<string, unknown>) ?? this.active,
+                mode,
               });
-              this.setBusy(false);
+              this.broadcast({ t: "usage", summary: this.ledger.summarize(this.ws.id) });
+              this.inferBusy(false);
               break;
+            }
+            case "prompt_suggestion": {
+              // Live only. Persisting it would put a model-authored sentence in
+              // the transcript that the user never said or received.
+              this.suggestion = String((msg as unknown as { suggestion?: string }).suggestion ?? "").slice(0, 200);
+              this.broadcast({ t: "suggestion", suggestion: this.suggestion });
+              break;
+            }
+            case "rate_limit_event": {
+              // Subscription plans only — API-key/Bedrock/Vertex never send it.
+              // Hitting a cap mid-review with no warning is worse than a blank
+              // tile, and this is the only source for it.
+              this.rateLimit = (msg as unknown as { rate_limit_info?: Record<string, unknown> })
+                .rate_limit_info ?? null;
+              this.broadcast({ t: "limits", limits: this.rateLimit });
+              break;
+            }
             default:
               break;
           }
@@ -392,6 +1178,8 @@ export class AgentChat {
         this.emit("error", { message: e instanceof Error ? e.message : String(e) });
       } finally {
         if (this.q === q) this.q = null;
+        // The query is gone, so the CLI's last reported state is stale.
+        this.cliState = null;
         this.setBusy(false);
       }
     })();
@@ -404,11 +1192,11 @@ export class AgentChats {
 
   constructor(private cfg: GrottoConfig) {}
 
-  get(sessionId: string, dir: string): AgentChat {
-    let chat = this.chats.get(sessionId);
+  get(ws: Workspace): AgentChat {
+    let chat = this.chats.get(ws.id);
     if (!chat) {
-      chat = new AgentChat(this.cfg, sessionId, dir);
-      this.chats.set(sessionId, chat);
+      chat = new AgentChat(this.cfg, ws);
+      this.chats.set(ws.id, chat);
     }
     return chat;
   }

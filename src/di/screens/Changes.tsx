@@ -7,19 +7,21 @@ export function ChangesScreen({
   s, activeDiff, loading, onSelect, onVerdict, onReviewed, onCommitSync,
 }: {
   s: SessionState;
-  activeDiff: { path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null;
+  activeDiff: { path: string; repo?: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null;
   sample: typeof SAMPLE;
   loading?: boolean;
-  onSelect: (path: string) => void;
+  onSelect: (path: string, repo?: string) => void;
   onVerdict: (path: string, hunk: number, v: Verdict) => void;
-  onReviewed: (path: string) => void;
+  onReviewed: (path: string, repo?: string) => void;
   onCommitSync: () => void;
 }) {
   const clean = !loading && s.changes.length === 0;
   const needsYou = s.changes.filter((c) => c.needsYou);
   const awaiting = s.changes.filter((c) => !c.needsYou);
   const staged = s.changes.filter((c) => !c.needsYou).length;
-  const activePath = activeDiff?.path ?? null;
+  // A change is identified by (checkout, path): two repos in one session can
+  // both have a `src/index.ts`, and only one of them is the open diff.
+  const isActive = (c: Change) => !!activeDiff && activeDiff.path === c.path && activeDiff.repo === c.repo;
   const totals = activeDiff
     ? activeDiff.hunks.reduce((a, h) => {
         for (const l of h.lines) { if (l.kind === "add") a.add++; else if (l.kind === "del") a.del++; }
@@ -37,17 +39,17 @@ export function ChangesScreen({
           <span className="di-mono" style={{ fontSize: 10.5, color: "var(--di-ink)", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.branch}</span>
           {s.ahead > 0 && <span className="di-mono" style={{ fontSize: 10, color: "var(--di-pos)", flex: "0 0 auto" }}>↑{s.ahead}</span>}
         </div>
-        <button className="di-btn" aria-label="Refresh" onClick={() => activePath && onSelect(activePath)} style={{ flex: "0 0 auto", width: 34, height: 34, border: "1px solid var(--di-rail-row-border)", borderRadius: 9, background: "var(--di-rail-row-bg)", color: "var(--di-rail-hue)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <button className="di-btn" aria-label="Refresh" onClick={() => activeDiff && onSelect(activeDiff.path, activeDiff.repo)} style={{ flex: "0 0 auto", width: 34, height: 34, border: "1px solid var(--di-rail-row-border)", borderRadius: 9, background: "var(--di-rail-row-bg)", color: "var(--di-rail-hue)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
           <Icon name="refresh-cw" size={14} />
         </button>
       </div>
 
       <div className="di-scroll" style={{ position: "absolute", top: 122, left: 0, width: 340, bottom: 110, boxSizing: "border-box", padding: "0 14px", zIndex: 5 }}>
         {needsYou.length > 0 && <div className="di-eyebrow" style={{ color: "var(--di-spot)", padding: "2px 2px 8px" }}>Needs you · {needsYou.length}</div>}
-        {needsYou.map((c) => <ChangeRow key={c.path} c={c} spotColor="var(--di-spot)" active={c.path === activePath} onSelect={onSelect} onReviewed={onReviewed} />)}
+        {needsYou.map((c) => <ChangeRow key={rowKey(c)} c={c} spotColor="var(--di-spot)" active={isActive(c)} onSelect={onSelect} onReviewed={onReviewed} />)}
         <div className="di-eyebrow" style={{ color: "var(--di-rail-hue)", padding: "10px 2px 8px" }}>Awaiting · {awaiting.length}</div>
         {awaiting.length === 0 && <div style={{ fontSize: 11.5, color: "var(--di-ink-mute)", padding: "4px 2px" }}>No pending changes.</div>}
-        {awaiting.map((c) => <ChangeRow key={c.path} c={c} spotColor="var(--di-rail-hue)" active={c.path === activePath} onSelect={onSelect} onReviewed={onReviewed} />)}
+        {awaiting.map((c) => <ChangeRow key={rowKey(c)} c={c} spotColor="var(--di-rail-hue)" active={isActive(c)} onSelect={onSelect} onReviewed={onReviewed} />)}
       </div>
 
       <RailDock style={{ padding: "12px 14px 13px" }}>
@@ -106,7 +108,9 @@ export function ChangesScreen({
   );
 }
 
-function ChangeRow({ c, spotColor, active, onSelect, onReviewed }: { c: Change; spotColor: string; active: boolean; onSelect: (p: string) => void; onReviewed: (p: string) => void }) {
+const rowKey = (c: Change) => `${c.repo ?? ""}\u0000${c.path}`;
+
+function ChangeRow({ c, spotColor, active, onSelect, onReviewed }: { c: Change; spotColor: string; active: boolean; onSelect: (p: string, repo?: string) => void; onReviewed: (p: string, repo?: string) => void }) {
   const isApproval = c.kind === "approval";
   const bg = c.needsYou ? "var(--di-rail-row-bg)" : active ? "#122a20" : "transparent";
   const border = c.needsYou ? "1px solid var(--di-rail-row-border)" : "1px solid transparent";
@@ -118,7 +122,7 @@ function ChangeRow({ c, spotColor, active, onSelect, onReviewed }: { c: Change; 
   };
   const chip = chipColors[c.status];
   return (
-    <div className="di-row di-btn" onClick={() => !isApproval && onSelect(c.path)}
+    <div className="di-row di-btn" onClick={() => !isApproval && onSelect(c.path, c.repo)}
       style={{ position: "relative", display: "flex", gap: 9, alignItems: "center", padding: "9px 11px 9px 13px", borderRadius: 9, background: bg, border, marginBottom: 5, cursor: isApproval ? "default" : "pointer", overflow: "hidden" }}>
       {showSpot && <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: spotColor }} />}
       {isApproval ? (
@@ -126,9 +130,11 @@ function ChangeRow({ c, spotColor, active, onSelect, onReviewed }: { c: Change; 
       ) : (
         <span className="di-mono" style={{ width: 15, height: 15, flex: "0 0 auto", borderRadius: 4, background: chip.bg, color: chip.fg, fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>{c.status}</span>
       )}
-      <span className="di-mono" style={{ fontSize: 11, color: c.needsYou || active ? "var(--di-ink)" : "var(--di-ink-soft)", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textDecoration: c.reviewed ? "line-through" : "none", opacity: c.reviewed ? 0.6 : 1 }}>{c.path}</span>
+      <span className="di-mono" style={{ fontSize: 11, color: c.needsYou || active ? "var(--di-ink)" : "var(--di-ink-soft)", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textDecoration: c.reviewed ? "line-through" : "none", opacity: c.reviewed ? 0.6 : 1 }}>
+        {c.repo && <span style={{ color: "var(--di-info)" }}>{c.repo}/</span>}{c.path}
+      </span>
       {!isApproval && (
-        <button className="di-btn" onClick={(e) => { e.stopPropagation(); onReviewed(c.path); }} aria-label="Mark reviewed" title="Mark reviewed"
+        <button className="di-btn" onClick={(e) => { e.stopPropagation(); onReviewed(c.path, c.repo); }} aria-label="Mark reviewed" title="Mark reviewed"
           style={{ border: 0, background: "transparent", cursor: "pointer", padding: 0, display: "flex" }}>
           <Icon name="check" size={13} color={c.reviewed ? "var(--di-pos)" : "#3e5670"} />
         </button>

@@ -15,9 +15,10 @@ export function SessionsHome({ onOpen, onSettings }: { onOpen: (id: string) => v
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [repos, setRepos] = useState<string[]>([]);
   const [query, setQuery] = useState("");
-  const [picked, setPicked] = useState<string | null>(null); // repo → branch modal
+  const [picked, setPicked] = useState<string | null>(null); // repo → setup modal
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<{ repo: string; detail: string } | null>(null);
+  const MAX_REPOS = 6; // mirrors the server bound
 
   useEffect(() => {
     void api.sessions().then(setSessions).catch(() => setSessions([]));
@@ -32,15 +33,15 @@ export function SessionsHome({ onOpen, onSettings }: { onOpen: (id: string) => v
     return hits.slice(0, 6);
   }, [query, repos]);
 
-  const create = async (repo: string, branch: string) => {
+  const create = async (specs: Array<{ repo: string; branch: string | null }>) => {
     setPicked(null); setCreating(true); setError(null);
     try {
-      const s = await api.createSession(repo, branch);
+      const s = await api.createSession(specs);
       setCreating(false);
       onOpen(s.id);
     } catch (e) {
       setCreating(false);
-      setError({ repo, detail: e instanceof Error ? e.message : String(e) });
+      setError({ repo: specs.map((x) => x.repo).join(", "), detail: e instanceof Error ? e.message : String(e) });
     }
   };
 
@@ -94,6 +95,12 @@ export function SessionsHome({ onOpen, onSettings }: { onOpen: (id: string) => v
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <Icon name="folder-git-2" size={13} color="var(--di-ink-mute)" />
                   <span className="di-mono" style={{ fontSize: 12, fontWeight: 600, color: "var(--di-ink)", minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.repo.split("/").pop()}</span>
+                  {(s.repos?.length ?? 1) > 1 && (
+                    <span className="di-mono" title={s.repos!.map((r) => r.repo).join("\n")}
+                      style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--di-info)", border: "1px solid #24485f", borderRadius: 5, padding: "1px 4px" }}>
+                      +{s.repos!.length - 1}
+                    </span>
+                  )}
                 </div>
                 <div className="di-mono" style={{ fontSize: 10.5, color: "#6f8296", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                   {(s.branch ?? "—")}{s.needsYou ? " · needs you" : s.ptyLive ? " · working" : " · idle"}
@@ -104,7 +111,7 @@ export function SessionsHome({ onOpen, onSettings }: { onOpen: (id: string) => v
         </div>
       )}
 
-      {picked && <BranchModal repo={picked} onCancel={() => setPicked(null)} onCreate={(b) => create(picked, b)} />}
+      {picked && <SetupModal first={picked} available={repos} max={MAX_REPOS} onCancel={() => setPicked(null)} onCreate={create} />}
       {creating && <Provisioning />}
       {error && <ProvisionError repo={error.repo} detail={error.detail} onBack={() => setError(null)} />}
     </div>
@@ -135,34 +142,123 @@ function RepoSearch({ query, setQuery, matches, onPick }: { query: string; setQu
   );
 }
 
-function BranchModal({ repo, onCancel, onCreate }: { repo: string; onCancel: () => void; onCreate: (branch: string) => void }) {
-  const [branch, setBranch] = useState("");
+interface Spec { repo: string; branch: string }
+
+/**
+ * Session setup — repos + branches. A session can span SEVERAL repositories:
+ * the first is the primary (the agent's working directory), the rest are
+ * mounted alongside it so the agent can read and edit across them in one
+ * conversation. That ordering is load-bearing, hence the explicit "primary"
+ * badge and the up-arrow to promote.
+ */
+function SetupModal({ first, available, max, onCancel, onCreate }: {
+  first: string;
+  available: string[];
+  max: number;
+  onCancel: () => void;
+  onCreate: (specs: Array<{ repo: string; branch: string | null }>) => void;
+}) {
+  const [specs, setSpecs] = useState<Spec[]>([{ repo: first, branch: "" }]);
+  const [adding, setAdding] = useState("");
+
+  const chosen = specs.map((s) => s.repo);
+  const suggestions = useMemo(() => {
+    const q = adding.trim().toLowerCase();
+    if (!q) return [];
+    const hits = available.filter((r) => r.toLowerCase().includes(q) && !chosen.includes(r));
+    const typed = adding.trim();
+    if (/^[\w.-]+\/[\w.-]+$/.test(typed) && !hits.includes(typed) && !chosen.includes(typed)) hits.unshift(typed);
+    return hits.slice(0, 5);
+  }, [adding, available, chosen.join(",")]);
+
+  const add = (repo: string) => {
+    if (specs.length >= max || chosen.includes(repo)) return;
+    setSpecs((p) => [...p, { repo, branch: "" }]);
+    setAdding("");
+  };
+  const submit = () => onCreate(specs.map((s) => ({ repo: s.repo, branch: s.branch.trim() || null })));
+
   return (
     <>
       <div onClick={onCancel} style={{ position: "absolute", inset: 0, background: "rgba(4,10,18,.72)", zIndex: 20 }} />
-      <div className="di-menu" role="dialog" aria-modal style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 520, maxWidth: "calc(100% - 40px)", border: "1px solid var(--di-rule)", borderRadius: 16, background: "#0a1a2a", boxShadow: "0 40px 90px -20px rgba(0,0,0,.85)", zIndex: 21, overflow: "hidden" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "18px 20px", borderBottom: "1px solid #17293a" }}>
+      <div className="di-menu" role="dialog" aria-modal style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 560, maxWidth: "calc(100% - 40px)", maxHeight: "calc(100% - 60px)", display: "flex", flexDirection: "column", border: "1px solid var(--di-rule)", borderRadius: 16, background: "#0a1a2a", boxShadow: "0 40px 90px -20px rgba(0,0,0,.85)", zIndex: 21, overflow: "hidden" }}>
+        <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 11, padding: "18px 20px", borderBottom: "1px solid #17293a" }}>
           <Icon name="folder-git-2" size={17} color="var(--di-info)" />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="di-mono" style={{ fontSize: 13.5, fontWeight: 600, color: "var(--di-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{repo}</div>
-            <div style={{ fontSize: 10.5, color: "#6f8296" }}>new session</div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--di-ink)" }}>New session</div>
+            <div style={{ fontSize: 10.5, color: "#6f8296" }}>{specs.length === 1 ? "1 repository" : `${specs.length} repositories`}</div>
           </div>
           <button className="di-btn" onClick={onCancel} aria-label="Close" style={{ border: 0, background: "transparent", cursor: "pointer", display: "flex" }}><Icon name="x" size={17} color="var(--di-ink-mute)" /></button>
         </div>
-        <div style={{ padding: "16px 20px" }}>
-          <div className="di-eyebrow" style={{ marginBottom: 9 }}>Base branch</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, height: 40, padding: "0 12px", border: "1px solid var(--di-rule)", borderRadius: 9, background: "#0e2032", marginBottom: 8 }}>
-            <Icon name="git-branch" size={14} color="var(--di-info)" />
-            <input autoFocus value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="default branch (leave blank)" spellCheck={false}
-              onKeyDown={(e) => e.key === "Enter" && onCreate(branch.trim())}
-              className="di-mono" style={{ flex: 1, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 12.5 }} />
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
-            <span style={{ flex: 1, fontSize: 11.5, color: "#6f8296", lineHeight: 1.45 }}>A fresh worktree is cloned for this session — your other sessions are untouched.</span>
-            <button className="di-btn" onClick={() => onCreate(branch.trim())} style={{ flex: "0 0 auto", height: 42, padding: "0 20px", border: 0, borderRadius: 11, background: "var(--di-spot)", color: "#3a140a", fontFamily: "inherit", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 8 }}>
-              Create session<Icon name="arrow-up" size={15} color="#3a140a" style={{ transform: "rotate(90deg)" }} />
-            </button>
-          </div>
+
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 20px" }}>
+          {specs.map((s, i) => (
+            <div key={s.repo} style={{ border: "1px solid var(--di-rule)", borderRadius: 11, background: "#0b1d2e", padding: "11px 12px", marginBottom: 9 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
+                <Icon name="folder-git-2" size={13} color={i === 0 ? "var(--di-spot)" : "var(--di-ink-mute)"} />
+                <span className="di-mono" style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: "var(--di-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.repo}</span>
+                {i === 0 ? (
+                  <span className="di-eyebrow" style={{ flex: "0 0 auto", color: "var(--di-spot)" }}>primary</span>
+                ) : (
+                  <>
+                    <button className="di-btn" title="Make primary" aria-label={`Make ${s.repo} primary`}
+                      onClick={() => setSpecs((p) => [p[i], ...p.filter((_, j) => j !== i)])}
+                      style={{ flex: "0 0 auto", border: 0, background: "transparent", cursor: "pointer", display: "flex", padding: 2 }}>
+                      <Icon name="arrow-up" size={14} color="var(--di-ink-mute)" />
+                    </button>
+                    <button className="di-btn" title="Remove" aria-label={`Remove ${s.repo}`}
+                      onClick={() => setSpecs((p) => p.filter((_, j) => j !== i))}
+                      style={{ flex: "0 0 auto", border: 0, background: "transparent", cursor: "pointer", display: "flex", padding: 2 }}>
+                      <Icon name="x" size={14} color="var(--di-ink-mute)" />
+                    </button>
+                  </>
+                )}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, height: 36, padding: "0 11px", border: "1px solid var(--di-rule)", borderRadius: 9, background: "#0e2032" }}>
+                <Icon name="git-branch" size={13} color="var(--di-info)" />
+                <input autoFocus={i === 0} value={s.branch} spellCheck={false}
+                  onChange={(e) => setSpecs((p) => p.map((x, j) => j === i ? { ...x, branch: e.target.value } : x))}
+                  onKeyDown={(e) => e.key === "Enter" && submit()}
+                  placeholder="default branch (leave blank)"
+                  className="di-mono" style={{ flex: 1, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 12 }} />
+              </div>
+            </div>
+          ))}
+
+          {specs.length < max ? (
+            <div style={{ position: "relative" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 9, height: 40, padding: "0 12px", border: "1px dashed #2c5075", borderRadius: 10, background: "transparent" }}>
+                <Icon name="search" size={14} color="var(--di-ink-mute)" />
+                <input value={adding} onChange={(e) => setAdding(e.target.value)} spellCheck={false}
+                  onKeyDown={(e) => { if (e.key === "Enter" && suggestions[0]) add(suggestions[0]); }}
+                  placeholder="Add another repository…"
+                  className="di-mono" style={{ flex: 1, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 12 }} />
+              </div>
+              {suggestions.length > 0 && (
+                <div style={{ position: "absolute", top: 44, left: 0, right: 0, zIndex: 5, border: "1px solid #2c5075", borderRadius: 11, background: "#0a1a2a", boxShadow: "0 24px 60px -18px rgba(0,0,0,.85)", padding: 5 }}>
+                  {suggestions.map((r) => (
+                    <button key={r} className="di-row di-btn" onClick={() => add(r)} style={{ display: "flex", alignItems: "center", gap: 9, width: "100%", padding: "8px 10px", borderRadius: 8, border: 0, background: "transparent", cursor: "pointer" }}>
+                      <Icon name="folder-git-2" size={13} color="var(--di-info)" />
+                      <span className="di-mono" style={{ fontSize: 12, color: "var(--di-ink)", flex: 1, minWidth: 0, textAlign: "left", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ fontSize: 11.5, color: "#6f8296", padding: "4px 2px" }}>Maximum of {max} repositories per session.</div>
+          )}
+        </div>
+
+        <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 10, padding: "14px 20px", borderTop: "1px solid #17293a" }}>
+          <span style={{ flex: 1, fontSize: 11.5, color: "#6f8296", lineHeight: 1.45 }}>
+            {specs.length === 1
+              ? "A fresh worktree is cloned for this session — your other sessions are untouched."
+              : `The agent works in ${specs[0].repo.split("/").pop()} and can read and edit the other ${specs.length - 1} alongside it.`}
+          </span>
+          <button className="di-btn" onClick={submit} style={{ flex: "0 0 auto", height: 42, padding: "0 20px", border: 0, borderRadius: 11, background: "var(--di-spot)", color: "#3a140a", fontFamily: "inherit", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 8 }}>
+            Create session<Icon name="arrow-up" size={15} color="#3a140a" style={{ transform: "rotate(90deg)" }} />
+          </button>
         </div>
       </div>
     </>

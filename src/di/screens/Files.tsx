@@ -1,44 +1,58 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type FileContent } from "../../api";
+import { api, type FileContent, type RepoRef } from "../../api";
 import { Icon } from "../primitives";
 import { MainColumn } from "../Shell";
 import type { TreeNode } from "../control";
 
-type Dialog = { kind: "file" | "folder" | "upload"; dir: string } | null;
+type Dialog = { kind: "file" | "folder" | "upload"; dir: string; repo?: string } | null;
 
-export function FilesScreen({ tree, sessionId }: { tree: TreeNode | null; sessionId: string }) {
+/** A file is identified by (checkout, path) — two repos in one session can both
+ *  have a `src/index.ts`. `repo` is undefined for the primary checkout. */
+interface Target { repo?: string; path: string }
+const sameTarget = (a: Target | null, b: Target) => !!a && a.path === b.path && a.repo === b.repo;
+
+export function FilesScreen({ trees, repos, sessionId }: { trees: TreeNode[]; repos: RepoRef[]; sessionId: string }) {
   const [open, setOpen] = useState<Record<string, boolean>>({ "": true });
   const [pins, setPins] = useState<Record<string, boolean>>({});
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Target | null>(null);
   const [file, setFile] = useState<FileContent | null>(null);
   const [loadingFile, setLoadingFile] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [dialog, setDialog] = useState<Dialog>(null);
 
-  const openFile = (path: string) => {
-    setSelected(path); setEditing(false); setFile(null); setLoadingFile(true);
-    void api.file(sessionId, path).then((f) => setFile(f)).catch(() => setFile(null)).finally(() => setLoadingFile(false));
+  const multi = trees.length > 1;
+  const openFile = (t: Target) => {
+    setSelected(t); setEditing(false); setFile(null); setLoadingFile(true);
+    void api.file(sessionId, t.path, t.repo).then((f) => setFile(f)).catch(() => setFile(null)).finally(() => setLoadingFile(false));
   };
-  const save = () => { if (!selected) return; void api.saveFile(sessionId, selected, draft).then(() => { setEditing(false); openFile(selected); }); };
+  const save = () => {
+    if (!selected) return;
+    void api.saveFile(sessionId, selected.path, draft, selected.repo).then(() => { setEditing(false); openFile(selected); });
+  };
 
   const rows: React.ReactNode[] = [];
-  const walk = (node: TreeNode) => {
-    const isOpen = open[node.path] ?? node.depth <= 1;
+  // Keys are namespaced by checkout so two repos' `src/` folders open and close
+  // independently — and so the selected row highlights in only one of them.
+  const walk = (node: TreeNode, repo: string | undefined, keyPrefix: string) => {
+    const key = keyPrefix + node.path;
+    const isOpen = open[key] ?? node.depth <= 1;
     if (node.depth > 0) {
-      const pinned = node.kind === "file" ? pins[node.path] : false;
+      const target: Target = { repo, path: node.path };
+      const isSel = sameTarget(selected, target);
+      const pinned = node.kind === "file" ? pins[key] : false;
       rows.push(
-        <div key={node.path || node.name} className={node.kind === "file" ? "di-row di-btn" : "di-btn"}
-          onClick={() => node.kind === "dir" ? setOpen((o) => ({ ...o, [node.path]: !isOpen })) : openFile(node.path)}
+        <div key={key || node.name} className={node.kind === "file" ? "di-row di-btn" : "di-btn"}
+          onClick={() => node.kind === "dir" ? setOpen((o) => ({ ...o, [key]: !isOpen })) : openFile(target)}
           style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", marginLeft: (node.depth - 1) * 16,
-            borderRadius: node.path === selected ? 6 : 0, background: node.path === selected ? "#12283f" : "transparent",
-            border: node.path === selected ? "1px solid var(--di-rule-strong)" : "1px solid transparent",
-            color: node.path === selected ? "var(--di-ink)" : "var(--di-ink-soft)", cursor: "pointer" }}>
+            borderRadius: isSel ? 6 : 0, background: isSel ? "#12283f" : "transparent",
+            border: isSel ? "1px solid var(--di-rule-strong)" : "1px solid transparent",
+            color: isSel ? "var(--di-ink)" : "var(--di-ink-soft)", cursor: "pointer" }}>
           <Icon name={node.kind === "dir" ? (isOpen ? "chevron-down" : "chevron-right") : "file-code-2"} size={13} color={node.kind === "dir" ? "var(--di-ink-mute)" : "#7f9bb5"} />
           {node.kind === "dir" && <Icon name="folder" size={14} color="#7f9bb5" />}
           <span style={{ flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{node.name}</span>
           {node.kind === "file" && (
-            <button className="di-btn" aria-label={pinned ? "Unpin" : "Pin to context"} onClick={(e) => { e.stopPropagation(); setPins((p) => ({ ...p, [node.path]: !p[node.path] })); }}
+            <button className="di-btn" aria-label={pinned ? "Unpin" : "Pin to context"} onClick={(e) => { e.stopPropagation(); setPins((p) => ({ ...p, [key]: !p[key] })); }}
               style={{ border: 0, background: "transparent", cursor: "pointer", padding: 0, display: "flex" }}>
               <Icon name="pin" size={13} color={pinned ? "var(--di-warn)" : "#3e5670"} />
             </button>
@@ -46,27 +60,42 @@ export function FilesScreen({ tree, sessionId }: { tree: TreeNode | null; sessio
         </div>,
       );
     }
-    if (node.kind === "dir" && (isOpen || node.depth === 0)) node.children.forEach(walk);
+    if (node.kind === "dir" && (isOpen || node.depth === 0)) node.children.forEach((c) => walk(c, repo, keyPrefix));
   };
-  if (tree) walk(tree);
+
+  const ready = repos.filter((r) => r.status === "ready");
+  trees.forEach((root, i) => {
+    // Slot 0 is the primary — its `repo` stays undefined so single-repo sessions
+    // send exactly the requests they always did.
+    const repo = i === 0 ? undefined : ready[i]?.name;
+    const keyPrefix = `${i}:`;
+    const rootOpen = open[`${keyPrefix}__root`] ?? true;
+    rows.push(
+      <div key={`${keyPrefix}__root`} className="di-btn"
+        onClick={() => multi && setOpen((o) => ({ ...o, [`${keyPrefix}__root`]: !rootOpen }))}
+        style={{ display: "flex", alignItems: "center", gap: 7, padding: "6px 8px", marginTop: i ? 10 : 0, color: "var(--di-ink)", fontWeight: 600, border: 0, background: "transparent", cursor: multi ? "pointer" : "default", width: "100%" }}>
+        <Icon name={rootOpen ? "chevron-down" : "chevron-right"} size={13} color="var(--di-ink-mute)" />
+        <Icon name="folder-git-2" size={14} color={i === 0 ? "var(--di-spot)" : "var(--di-info)"} />
+        <span style={{ flex: 1, minWidth: 0, textAlign: "left", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{root.name}</span>
+        {multi && i === 0 && <span className="di-eyebrow" style={{ fontSize: 9, color: "var(--di-spot)" }}>primary</span>}
+      </div>,
+    );
+    if (rootOpen) walk(root, repo, keyPrefix);
+  });
 
   return (
     <>
       <div className="di-scroll di-mono" style={{ position: "absolute", top: 52, left: 0, width: 340, bottom: 0, boxSizing: "border-box", padding: "0 10px 8px", zIndex: 5, fontSize: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "2px 4px 9px" }}>
           <span className="di-eyebrow" style={{ flex: 1, fontFamily: "var(--di-font-sans)" }}>Files</span>
+          {/* New files land in the checkout you're currently looking at. */}
           {(["file", "folder", "upload"] as const).map((k) => (
-            <button key={k} className="di-btn" aria-label={k} onClick={() => setDialog({ kind: k, dir: "" })} style={{ width: 26, height: 26, border: "1px solid var(--di-rule)", borderRadius: 7, background: "transparent", color: "var(--di-ink-soft)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <button key={k} className="di-btn" aria-label={k} onClick={() => setDialog({ kind: k, dir: "", repo: selected?.repo })} style={{ width: 26, height: 26, border: "1px solid var(--di-rule)", borderRadius: 7, background: "transparent", color: "var(--di-ink-soft)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
               <Icon name={k === "file" ? "file-plus-2" : k === "folder" ? "folder-plus" : "upload"} size={13} />
             </button>
           ))}
         </div>
-        {tree && tree.depth === 0 && (
-          <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "6px 8px", color: "var(--di-ink)", fontWeight: 600 }}>
-            <Icon name="chevron-down" size={13} color="var(--di-ink-mute)" /><Icon name="folder-git-2" size={14} color="var(--di-spot)" /><span>{tree.name}</span>
-          </div>
-        )}
-        {!tree && [70, 55, 80, 48, 62, 75, 52].map((w, i) => (
+        {trees.length === 0 && [70, 55, 80, 48, 62, 75, 52].map((w, i) => (
           <div key={i} style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 12, paddingLeft: (i % 3) * 14 }}>
             <div style={{ width: 13, height: 13, borderRadius: 3, background: "#12283f", opacity: 0.6, animation: "di-pulse 1.6s infinite" }} />
             <div style={{ width: `${w}%`, height: 11, borderRadius: 6, background: "#12283f", opacity: 0.6, animation: "di-pulse 1.6s infinite" }} />
@@ -84,7 +113,9 @@ export function FilesScreen({ tree, sessionId }: { tree: TreeNode | null; sessio
           <>
             <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 9, padding: "12px 20px", borderBottom: "1px solid var(--di-rule)", background: "var(--di-panel-alt)" }}>
               <Icon name={editing ? "file-pen-line" : "file-code-2"} size={15} color={editing ? "var(--di-warn)" : "var(--di-ink-mute)"} />
-              <span className="di-mono" style={{ fontSize: 11, color: "var(--di-ink)" }}>{selected}</span>
+              <span className="di-mono" style={{ fontSize: 11, color: "var(--di-ink)" }}>
+                {selected.repo && <span style={{ color: "var(--di-info)" }}>{selected.repo}/</span>}{selected.path}
+              </span>
               {editing && draft !== file?.content && <span style={{ display: "inline-flex", alignItems: "center", height: 20, padding: "0 9px", borderRadius: 999, background: "#1a1206", border: "1px solid #5a3316", fontSize: 10, color: "var(--di-warn)" }}>unsaved</span>}
               <div style={{ flex: 1 }} />
               {file && !file.binary && !editing && (
@@ -127,7 +158,7 @@ export function FilesScreen({ tree, sessionId }: { tree: TreeNode | null; sessio
         )}
       </MainColumn>
 
-      {dialog && <AddDialog dialog={dialog} sessionId={sessionId} onClose={() => setDialog(null)} onCreated={(p) => { setDialog(null); openFile(p); }} />}
+      {dialog && <AddDialog dialog={dialog} sessionId={sessionId} onClose={() => setDialog(null)} onCreated={(p) => { setDialog(null); openFile({ repo: dialog.repo, path: p }); }} />}
     </>
   );
 }
@@ -140,10 +171,10 @@ function AddDialog({ dialog, sessionId, onClose, onCreated }: { dialog: NonNulla
   const create = () => {
     const path = prefix + name.trim();
     if (!name.trim()) return;
-    if (kind === "folder") void api.mkdir(sessionId, path).then(() => onClose());
-    else void api.saveFile(sessionId, path, "").then(() => onCreated(path));
+    if (kind === "folder") void api.mkdir(sessionId, path, dialog.repo).then(() => onClose());
+    else void api.saveFile(sessionId, path, "", dialog.repo).then(() => onCreated(path));
   };
-  const upload = (f: File) => { void api.upload(sessionId, prefix + f.name, f).then(() => onClose()); };
+  const upload = (f: File) => { void api.upload(sessionId, prefix + f.name, f, dialog.repo).then(() => onClose()); };
   return (
     <>
       <div onClick={onClose} style={{ position: "absolute", inset: 0, background: "rgba(4,10,18,.55)", zIndex: 20 }} />

@@ -1,51 +1,36 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon, RailTitle } from "../primitives";
 import { RailScroll, RailDock, MainColumn } from "../Shell";
-import type { ChatState } from "../control";
+import type { ChatMsg, ChatState } from "../control";
 import type { SAMPLE } from "../control";
-import type { SearchHit } from "../../api";
+import type { ChatStatus, ModelRow, RewindResult, SearchHit, UsageSummary } from "../../api";
 import type { CavemanMode, SessionState } from "../state";
 
 const MODES: CavemanMode[] = ["off", "lite", "full", "ultra"];
 const BAR_H = [22, 46, 70, 100];
 const BAR_TINT = ["#2b4056", "#5a4326", "#8a5a24", "#a8641f"];
 
-// `id` is the real SDK model identifier passed to query(); `label` is display.
-const MODELS = [
-  { id: "claude-sonnet-5", label: "Sonnet 5", sub: "Balanced · best for review loops" },
-  { id: "claude-opus-4-8", label: "Opus 4.8", sub: "Deepest reasoning · slower, pricier" },
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", sub: "Fastest · light edits and chores" },
-  { id: "claude-fable-5", label: "Fable 5", sub: "Creative long-form · Claude 5 family" },
-];
+/** Display copy for an effort level; the AVAILABLE levels come per-model from
+ *  the SDK catalog (ModelInfo.supportedEffortLevels), never from a hardcode. */
+const EFFORT_META: Record<string, { label: string; sub: string }> = {
+  low: { label: "Low", sub: "Minimal thinking · fastest" },
+  medium: { label: "Medium", sub: "Moderate thinking" },
+  high: { label: "High", sub: "Deep reasoning · default" },
+  xhigh: { label: "X-High", sub: "Deeper than high" },
+  max: { label: "Max", sub: "Maximum effort" },
+};
 
-const EFFORTS = [
-  { id: "low", label: "Low", sub: "Minimal thinking · fastest" },
-  { id: "medium", label: "Medium", sub: "Moderate thinking" },
-  { id: "high", label: "High", sub: "Deep reasoning · default" },
-  { id: "xhigh", label: "X-High", sub: "Deeper than high" },
-  { id: "max", label: "Max", sub: "Maximum effort" },
-];
-
-/** Haiku has no effort levels; everything else (incl. the default) does. */
-function modelSupportsEffort(id?: string | null): boolean {
-  return !(id ?? "").toLowerCase().includes("haiku");
-}
-
-/** Friendly label for a raw SDK model id (which may carry a date suffix). */
-function modelLabel(id?: string | null): string {
-  if (!id) return "Default model";
-  const exact = MODELS.find((m) => m.id === id);
-  if (exact) return exact.label;
-  const l = id.toLowerCase();
-  if (l.includes("opus")) return "Opus";
-  if (l.includes("sonnet")) return "Sonnet";
-  if (l.includes("haiku")) return "Haiku";
-  if (l.includes("fable")) return "Fable";
-  return id;
+/** The catalog row for the current session: the user's explicit pick if any,
+ *  else the row matching what the CLI actually resolved (Default sessions). */
+function activeRow(rows: ModelRow[] | null, model: string | null, active: string | null): ModelRow | null {
+  if (!rows?.length) return null;
+  if (model) return rows.find((r) => r.value === model || r.resolvedModel === model) ?? null;
+  if (active) return rows.find((r) => r.resolvedModel === active || r.value === active) ?? null;
+  return null;
 }
 
 export function SessionScreen({
-  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, onModel, onEffort, onAddPin, onRemovePin, onSearch,
+  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, usage, status, onModel, onEffort, onRefreshModels, onPermissionMode, onReadOnly, onBudget, onMaxTurns, onPreviewRewind, onRewind, onAddPin, onRemovePin, onSearch,
 }: {
   s: SessionState;
   chat: ChatState;
@@ -55,10 +40,20 @@ export function SessionScreen({
   onConnect: () => void;
   onCaveman: (m: CavemanMode) => void;
   onSend: (text: string) => void;
-  onApproval: (id: string, d: "allow" | "always" | "deny") => void;
+  onApproval: (id: string, d: "allow" | "always" | "deny" | "stop", input?: Record<string, unknown>) => void;
   onInterrupt: () => void;
+  models: ModelRow[] | null;
+  usage: UsageSummary | null;
+  status: ChatStatus | null;
   onModel: (m: string) => void;
   onEffort: (e: string | null) => void;
+  onRefreshModels: () => void;
+  onPermissionMode: (mode: string) => void;
+  onReadOnly: (on: boolean) => void;
+  onBudget: (usd: number | null) => void;
+  onMaxTurns: (t: number | null) => void;
+  onPreviewRewind: (uuid: string) => Promise<RewindResult>;
+  onRewind: (uuid: string) => Promise<RewindResult>;
   onAddPin: (icon: string, label: string) => void;
   onRemovePin: (id: string) => void;
   onSearch: (q: string) => Promise<SearchHit[]>;
@@ -83,13 +78,11 @@ export function SessionScreen({
       <RailScroll bottom={64}>
         <RailTitle style={{ padding: "2px 2px 11px" }}>Session</RailTitle>
 
-        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-          <KpiTile eyebrow="Caveman" value={cavemanSavings ?? (sample.cavemanPercent ? `${s.caveman.savedPct}%` : "—")}
-            unit={cavemanSavings ? "saved" : "context saved"} sampleTag={!cavemanSavings && sample.cavemanPercent}
-            valueColor="var(--di-info)" border="#23415f" bg="#0f2842" eyebrowColor="var(--di-ink-mute)" />
-          <KpiTile eyebrow="RTK" value={`+${s.rtk.gainPct}%`} unit="tokens returned" sampleTag={sample.rtk}
-            valueColor="var(--di-pos)" border="#2a3f2e" bg="#10241a" eyebrowColor="#8fb89a" />
-        </div>
+        <EfficiencyPanel usage={usage} cavemanSavings={cavemanSavings} costsAreReal={status?.costsAreReal ?? false} />
+
+        <ContextMeter context={status?.context ?? null} limits={chat.limits} />
+
+        <HookLiveness hooks={chat.hooks} />
 
         {/* caveman verbosity — writes the real flag via /api/caveman */}
         <div style={{ marginBottom: 16, border: "1px solid #23415f", borderRadius: 11, background: "linear-gradient(180deg,#0f2842,#0b1f34)", padding: "8px 11px 7px" }}>
@@ -170,37 +163,63 @@ export function SessionScreen({
         <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 9, padding: "14px 20px", borderBottom: "1px solid var(--cc-rule)" }}>
           <Icon name="asterisk" size={16} color="#c9d2dc" />
           <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--cc-ink)" }}>Claude Code</span>
+          {chat.busy && chat.thinkingTokens > 0 && (
+            <span className="di-mono" title="Estimated reasoning tokens for this turn"
+              style={{ display: "inline-flex", alignItems: "center", gap: 5, height: 22, padding: "0 9px", borderRadius: 999, background: "#141d33", border: "1px solid #2c3f5a", fontSize: 10.5, color: "#8fa6d0" }}>
+              <Icon name="sparkles" size={10} color="#8fa6d0" />thinking · {fmtTokens(chat.thinkingTokens)}
+            </span>
+          )}
           {chat.busy && (
             <button className="di-btn" onClick={onInterrupt} style={{ display: "inline-flex", alignItems: "center", gap: 5, height: 22, padding: "0 9px", borderRadius: 999, background: "#132018", border: "1px solid #23402e", fontSize: 10.5, color: "#5fbf7f", cursor: "pointer" }}>
               <span style={{ width: 6, height: 6, borderRadius: 999, background: "#5fbf7f", animation: "di-pulse 1.4s infinite" }} />working · stop
             </button>
           )}
           <span style={{ flex: 1 }} />
+          {/* how much the agent may do without asking — the leash */}
+          <LeashPill
+            mode={chat.permissionMode}
+            readOnly={chat.readOnly}
+            budgetUsd={chat.budgetUsd}
+            maxTurns={chat.maxTurns}
+            costsAreReal={status?.costsAreReal ?? false}
+            onMode={onPermissionMode}
+            onReadOnly={onReadOnly}
+            onBudget={onBudget}
+            onMaxTurns={onMaxTurns}
+          />
           {/* reasoning-effort picker — only for models that support it */}
-          {modelSupportsEffort(chat.model) && <EffortPicker value={chat.effort} onEffort={onEffort} />}
+          {(() => { const r = activeRow(models, chat.model, chat.activeModel); const lv = r ? (r.supportsEffort ? r.supportedEffortLevels : []) : []; return lv.length > 0 ? <EffortPicker value={chat.effort} levels={lv} onEffort={onEffort} /> : null; })()}
           {/* model picker (41a) */}
           <div style={{ position: "relative" }}>
             <button className="di-btn" onClick={() => setModelMenu((m) => !m)} style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 28, padding: "0 12px", border: "1px solid #34608c", borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
               <span style={{ width: 7, height: 7, borderRadius: 999, background: "var(--di-info)" }} />
-              <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>{modelLabel(chat.model)}</span>
+              <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>{activeRow(models, chat.model, chat.activeModel)?.displayName ?? (chat.model ?? "Default")}</span>
               <Icon name="chevron-down" size={13} color="var(--cc-ink-mute)" />
             </button>
             {modelMenu && (
               <>
                 <div onClick={() => setModelMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
                 <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 260, zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
-                  <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9 }}>Model for this session</div>
-                  {MODELS.map((m) => {
-                    const active = chat.model === m.id;
+                  <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9, display: "flex", alignItems: "center", gap: 6 }}>
+                    Model for this session
+                    <button className="di-btn" onClick={onRefreshModels} title="Refresh model list"
+                      style={{ marginLeft: "auto", border: 0, background: "transparent", cursor: "pointer", padding: 0, display: "flex" }}>
+                      <Icon name="refresh-cw" size={11} color="var(--di-ink-mute)" />
+                    </button>
+                  </div>
+                  {models === null && <div style={{ padding: "10px 12px", fontSize: 11.5, color: "#6f8296" }}>Loading models…</div>}
+                  {models !== null && models.length === 0 && <div style={{ padding: "10px 12px", fontSize: 11.5, color: "var(--di-warn)" }}>No models returned — check Claude auth.</div>}
+                  {(models ?? []).map((m) => {
+                    const active = chat.model ? (chat.model === m.value || chat.model === m.resolvedModel) : false;
                     return (
-                      <button key={m.id} className="di-row di-btn" onClick={() => { onModel(m.id); setModelMenu(false); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: "pointer", marginBottom: 2 }}>
+                      <button key={m.value} className="di-row di-btn" onClick={() => { onModel(m.value); setModelMenu(false); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: "pointer", marginBottom: 2 }}>
                         <Icon name={active ? "check-circle-2" : "circle"} size={15} color={active ? "var(--di-info)" : "#33475c"} />
-                        <span style={{ flex: 1 }}><span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{m.label}</span><span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{m.sub}</span></span>
+                        <span style={{ flex: 1, minWidth: 0 }}><span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{m.displayName}</span><span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{m.description}</span></span>
                       </button>
                     );
                   })}
                   <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 8px 4px", borderTop: "1px solid #17293a", marginTop: 4 }}>
-                    <Icon name="lock" size={12} color="var(--di-ink-mute)" /><span style={{ fontSize: 10.5, color: "#6f8296" }}>Applies to new messages. Caveman keeps trimming context on any model.</span>
+                    <Icon name="lock" size={12} color="var(--di-ink-mute)" /><span style={{ fontSize: 10.5, color: "#6f8296" }}>Live from Claude Code. Applies to new messages.</span>
                   </div>
                 </div>
               </>
@@ -210,9 +229,11 @@ export function SessionScreen({
 
         {claudeConnected === false
           ? <NotConnected onConnect={onConnect} />
-          : <ChatBody chat={chat} onApproval={onApproval} onSend={onSend} />}
+          : <ChatBody chat={chat} onApproval={onApproval} onSend={onSend} onPreviewRewind={onPreviewRewind} onRewind={onRewind} />}
 
-        {claudeConnected !== false && chat.messages.length > 0 && <Composer onSend={onSend} />}
+        {claudeConnected !== false && chat.messages.length > 0 && (
+          <Composer onSend={onSend} suggestion={!chat.busy ? chat.suggestion : null} />
+        )}
       </MainColumn>
     </>
   );
@@ -231,9 +252,32 @@ function NotConnected({ onConnect }: { onConnect: () => void }) {
   );
 }
 
-const SUGGESTIONS = ["Explain this repo", "Add a failing test", "Fix the pending filter"];
+/** Cold-start chips. MEASURED: the CLI emits no slash-command inventory and no
+ *  model-authored suggestion until after turn one, so a brand-new session has
+ *  nothing real to offer — these three cover exactly that gap and are replaced
+ *  by the repo's actual commands the moment the CLI reports them. */
+const STARTERS = ["Explain this repo", "Add a failing test", "Fix the pending filter"];
 
-function ChatBody({ chat, onApproval, onSend }: { chat: ChatState; onApproval: (id: string, d: "allow" | "always" | "deny") => void; onSend: (t: string) => void }) {
+/** Commands that are noise as a starting point — they act on a conversation
+ *  that does not exist yet, or on DI's own surfaces. */
+const CHIP_SKIP = /^(help|clear|exit|quit|compact|usage|cost|stats|resume|logout|login|config|status|doctor|upgrade|release-notes|bug|feedback|privacy|terms|vim|theme|model|memory)$/i;
+
+function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind }: {
+  chat: ChatState;
+  onApproval: (id: string, d: "allow" | "always" | "deny" | "stop", input?: Record<string, unknown>) => void;
+  onSend: (t: string) => void;
+  onPreviewRewind: (uuid: string) => Promise<RewindResult>;
+  onRewind: (uuid: string) => Promise<RewindResult>;
+}) {
+  // Real slash commands when the CLI has told us what this repo has; the
+  // hardcoded trio only while it hasn't.
+  const real = (chat.signals?.commands ?? [])
+    .filter((c) => c.name && !CHIP_SKIP.test(c.name) && !c.argumentHint)
+    .slice(0, 6);
+  const starters = real.length
+    ? real.map((c) => ({ label: `/${c.name}`, send: `/${c.name}`, title: c.description || `/${c.name}`, command: true }))
+    : STARTERS.map((t) => ({ label: t, send: t, title: t, command: false }));
+
   if (chat.messages.length === 0) {
     return (
       <>
@@ -242,9 +286,9 @@ function ChatBody({ chat, onApproval, onSend }: { chat: ChatState; onApproval: (
           <div style={{ fontSize: 17, fontWeight: 600, color: "var(--di-ink)", marginBottom: 7 }}>What should Claude build?</div>
           <div style={{ fontSize: 12.5, color: "var(--di-ink-mute)", marginBottom: 20 }}>Describe a change, paste an error, or pick a starting point.</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 9, justifyContent: "center", maxWidth: 440 }}>
-            {SUGGESTIONS.map((sug) => (
-              <button key={sug} className="di-btn" onClick={() => onSend(sug)} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "9px 13px", border: "1px solid var(--di-rule)", borderRadius: 999, background: "#0e2032", color: "var(--di-ink-soft)", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                <Icon name="sparkles" size={12} color="var(--di-info)" />{sug}
+            {starters.map((c) => (
+              <button key={c.label} className="di-btn" title={c.title} onClick={() => onSend(c.send)} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "9px 13px", border: "1px solid var(--di-rule)", borderRadius: 999, background: "#0e2032", color: "var(--di-ink-soft)", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                <Icon name={c.command ? "square-terminal" : "sparkles"} size={12} color="var(--di-info)" />{c.label}
               </button>
             ))}
           </div>
@@ -257,49 +301,172 @@ function ChatBody({ chat, onApproval, onSend }: { chat: ChatState; onApproval: (
     <div className="di-scroll" style={{ flex: 1, padding: "18px 22px", display: "flex", flexDirection: "column", gap: 13 }}>
       {chat.messages.map((m) => {
         if (m.role === "user") return (
-          <div key={m.id} style={{ alignSelf: "flex-end", maxWidth: "70%", background: "#1c2836", border: "1px solid #2a3a49", borderRadius: "12px 12px 4px 12px", padding: "10px 13px", fontSize: 12.5, lineHeight: 1.5, color: "#dbe3ec", whiteSpace: "pre-wrap" }}>{m.text}</div>
+          <UserBubble key={m.id} m={m} onPreviewRewind={onPreviewRewind} onRewind={onRewind} />
         );
         if (m.role === "agent") return (
           <div key={m.id} style={{ maxWidth: "86%", fontSize: 12.5, lineHeight: 1.6, color: "#aeb9c5", whiteSpace: "pre-wrap" }}>{m.text}</div>
         );
         if (m.role === "tool") return (
-          <div key={m.id} style={{ width: "100%", maxWidth: 520, border: "1px solid var(--cc-rule)", borderRadius: 9, background: "#0f1720" }}>
+          <div key={m.id} style={{ width: "100%", maxWidth: 520, border: "1px solid var(--cc-rule)", borderRadius: 9, background: "#0f1720", opacity: m.provisional ? 0.6 : 1 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px" }}>
               <Icon name="file-pen" size={13} color="#7f8c9a" />
-              <span className="di-mono" style={{ fontSize: 11, color: "#c9d2dc" }}>{m.text}{m.file ? ` · ${m.file}` : ""}</span>
+              <span className="di-mono" style={{ fontSize: 11, color: "#c9d2dc", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m.text}{m.file ? ` · ${m.file}` : ""}</span>
+              {/* Elapsed time only once it is long enough to be worth saying. */}
+              {typeof m.elapsed === "number" && m.elapsed >= 3 && (
+                <span className="di-mono" style={{ flex: "0 0 auto", fontSize: 10, color: "#6f8296" }}>{m.elapsed}s</span>
+              )}
             </div>
           </div>
         );
-        // approval — the native Allow/Always/Deny card
+        // Auto-denied by a rule, mode or classifier — canUseTool was never
+        // called, so without this row the agent just looks like it gave up.
+        if (m.role === "denied") return (
+          <div key={m.id} style={{ width: "100%", maxWidth: 520, display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", border: "1px solid #4a2b2b", borderRadius: 9, background: "#1a1010" }}>
+            <Icon name="shield-off" size={13} color="var(--di-neg)" />
+            <span className="di-mono" style={{ fontSize: 11, color: "#e2a5a5" }}>
+              blocked · {m.text}
+            </span>
+            <span style={{ flex: 1 }} />
+            <span style={{ fontSize: 10, color: "#8a6a6a" }}>{m.level}</span>
+          </div>
+        );
+        // A banner from the loop — most often a hook's block reason, which used
+        // to vanish and leave a prompt that appeared to do nothing.
+        if (m.role === "notice") {
+          const warn = m.level === "warning" || m.stops;
+          return (
+            <div key={m.id} style={{ width: "100%", maxWidth: 560, display: "flex", gap: 8, padding: "9px 12px", border: `1px solid ${warn ? "#5a3316" : "#24384f"}`, borderRadius: 9, background: warn ? "#1a1206" : "#101a24" }}>
+              <Icon name={warn ? "alert-triangle" : "info"} size={13} color={warn ? "var(--di-warn)" : "var(--di-ink-mute)"} style={{ flex: "0 0 auto", marginTop: 2 }} />
+              <span style={{ fontSize: 11.5, lineHeight: 1.5, color: warn ? "#e8c9a0" : "#93a4b5", whiteSpace: "pre-wrap" }}>
+                {m.text}{m.stops ? " · the turn stopped here" : ""}
+              </span>
+            </div>
+          );
+        }
+        // A receipt for an undo that actually happened.
+        if (m.role === "rewound") return (
+          <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "2px 0" }}>
+            <span style={{ flex: 1, height: 1, background: "#3a2a1a" }} />
+            <span className="di-mono" style={{ fontSize: 10, color: "var(--di-warn)" }}>{m.text}</span>
+            <span style={{ flex: 1, height: 1, background: "#3a2a1a" }} />
+          </div>
+        );
+        // Compaction silently changes what the agent remembers. Mark it.
+        if (m.role === "compacted") return (
+          <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "2px 0" }}>
+            <span style={{ flex: 1, height: 1, background: "#2a3a49" }} />
+            <span className="di-mono" style={{ fontSize: 10, color: "#6f8296" }}>{m.text}</span>
+            <span style={{ flex: 1, height: 1, background: "#2a3a49" }} />
+          </div>
+        );
+        // approval — a review instrument, not a yes/no prompt
         const pending = chat.pendingApprovalId === m.approvalId;
-        return (
-          <div key={m.id} style={{ alignSelf: "flex-start", border: "1px solid #3a2f18", borderRadius: 9, background: "#181206", padding: "10px 12px", maxWidth: "86%" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: pending ? 9 : 0 }}>
-              <Icon name="terminal" size={13} color="#c99a4a" />
-              <span style={{ fontSize: 11.5, color: "#d9c9a6" }}>{m.text}</span>
-            </div>
-            {pending && (
-              <div style={{ display: "flex", gap: 7 }}>
-                {(["allow", "always", "deny"] as const).map((d) => (
-                  <button key={d} className="di-btn" onClick={() => onApproval(m.approvalId!, d)}
-                    style={{ height: 28, padding: "0 12px", borderRadius: 7, border: d === "deny" ? "1px solid #4a2020" : 0, cursor: "pointer",
-                      background: d === "deny" ? "transparent" : d === "always" ? "#1f8a5b" : "#2a6a44", color: d === "deny" ? "var(--di-neg)" : "#eafff1", fontSize: 11, fontWeight: 600, fontFamily: "inherit", textTransform: "capitalize" }}>{d}</button>
-                ))}
-              </div>
-            )}
-          </div>
-        );
+        return <ApprovalCard key={m.id} m={m} pending={pending} onApproval={onApproval} />;
       })}
     </div>
   );
 }
 
-function Composer({ onSend }: { onSend: (t: string) => void }) {
+/**
+ * A user message, with the one undo DI has.
+ *
+ * "Rewind here" restores every file the agent changed SINCE this message. It
+ * is a two-step: a dry run reports the file count and line delta, and only
+ * then does the confirm touch disk — the same shape as the typed-challenge
+ * gate elsewhere, scaled to the blast radius.
+ *
+ * The transcript does NOT rewind with the files. There is no counterpart in
+ * the SDK, so the card says so rather than implying the conversation moved.
+ */
+function UserBubble({ m, onPreviewRewind, onRewind }: {
+  m: ChatMsg;
+  onPreviewRewind: (uuid: string) => Promise<RewindResult>;
+  onRewind: (uuid: string) => Promise<RewindResult>;
+}) {
+  const [preview, setPreview] = useState<RewindResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const ask = () => {
+    if (!m.uuid) return;
+    setBusy(true);
+    void onPreviewRewind(m.uuid).then(setPreview).finally(() => setBusy(false));
+  };
+  const confirm = () => {
+    if (!m.uuid) return;
+    setBusy(true);
+    void onRewind(m.uuid)
+      .then((r) => { setPreview(r.canRewind ? null : r); setDone(r.canRewind); })
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div style={{ alignSelf: "flex-end", maxWidth: "70%", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
+      <div style={{ background: "#1c2836", border: "1px solid #2a3a49", borderRadius: "12px 12px 4px 12px", padding: "10px 13px", fontSize: 12.5, lineHeight: 1.5, color: "#dbe3ec", whiteSpace: "pre-wrap" }}>{m.text}</div>
+
+      {/* Only messages we stamped can be rewound to — older transcripts have
+          no anchor, and offering a dead button would be worse than none. */}
+      {m.uuid && !done && !preview && (
+        <button className="di-btn" onClick={ask} disabled={busy}
+          style={{ border: 0, background: "transparent", color: "#586573", fontFamily: "inherit", fontSize: 10.5, cursor: "pointer", padding: "0 2px" }}>
+          {busy ? "checking…" : "↩ rewind here"}
+        </button>
+      )}
+
+      {preview && (
+        <div style={{ width: 280, border: `1px solid ${preview.canRewind ? "#5a3316" : "#3a4653"}`, borderRadius: 10, background: preview.canRewind ? "#1a1206" : "#141d26", padding: "10px 12px" }}>
+          {preview.canRewind ? (
+            <>
+              <div style={{ fontSize: 11.5, color: "#e8c9a0", lineHeight: 1.5, marginBottom: 8 }}>
+                Restores <b>{preview.filesChanged?.length ?? 0}</b> file{(preview.filesChanged?.length ?? 0) === 1 ? "" : "s"}
+                {" "}(<span style={{ color: "var(--di-pos)" }}>+{preview.insertions ?? 0}</span>{" "}
+                <span style={{ color: "var(--di-neg)" }}>−{preview.deletions ?? 0}</span>) to their state before this message.
+                The conversation stays as it is — only files move.
+              </div>
+              {!!preview.filesChanged?.length && (
+                <div className="di-mono" style={{ fontSize: 9.5, color: "#a08a5e", lineHeight: 1.6, marginBottom: 9, maxHeight: 60, overflowY: "auto" }}>
+                  {preview.filesChanged.slice(0, 6).map((f) => <div key={f}>{f.split("/").slice(-2).join("/")}</div>)}
+                  {preview.filesChanged.length > 6 && <div>… {preview.filesChanged.length - 6} more</div>}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 6 }}>
+                <button className="di-btn" onClick={() => setPreview(null)}
+                  style={{ flex: 1, height: 30, border: "1px solid var(--di-rule)", borderRadius: 8, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 11.5, cursor: "pointer" }}>Cancel</button>
+                <button className="di-btn" onClick={confirm} disabled={busy}
+                  style={{ flex: 1, height: 30, border: 0, borderRadius: 8, background: "var(--di-warn)", color: "#1a1206", fontFamily: "inherit", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
+                  {busy ? "Restoring…" : "Restore files"}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 11, color: "#8fa6b5", lineHeight: 1.5 }}>
+              Can't rewind to here — {preview.error ?? "no checkpoint"}.
+              <button className="di-btn" onClick={() => setPreview(null)}
+                style={{ marginLeft: 6, border: 0, background: "transparent", color: "var(--di-info)", fontFamily: "inherit", fontSize: 11, cursor: "pointer", padding: 0 }}>dismiss</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Composer({ onSend, suggestion }: { onSend: (t: string) => void; suggestion?: string | null }) {
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
   const send = () => { const t = text.trim(); if (!t) return; onSend(t); setText(""); if (ref.current) ref.current.style.height = "auto"; };
   return (
     <div style={{ flex: "0 0 auto", padding: "14px 20px", borderTop: "1px solid var(--cc-rule)" }}>
+      {/* The model's OWN suggested next step. One chip, offered not assumed —
+          tapping fills the composer rather than sending, so the human still
+          presses send. */}
+      {suggestion && !text && (
+        <button className="di-btn" onClick={() => { setText(suggestion); ref.current?.focus(); }}
+          style={{ display: "inline-flex", alignItems: "center", gap: 7, maxWidth: "100%", marginBottom: 9, padding: "7px 12px", border: "1px solid #2c5075", borderRadius: 999, background: "#0e2032", color: "var(--di-ink-soft)", fontSize: 11.5, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+          <Icon name="sparkles" size={11} color="var(--di-info)" style={{ flex: "0 0 auto" }} />
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{suggestion}</span>
+        </button>
+      )}
       <div style={{ border: "1px solid #33414f", borderRadius: 12, background: "#0f1720", padding: "11px 13px", display: "flex", alignItems: "center", gap: 10 }}>
         <textarea ref={ref} value={text} onChange={(e) => setText(e.target.value)} rows={1} placeholder="Message Claude Code…"
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
@@ -342,9 +509,11 @@ const ROLE_META: Record<SearchHit["role"], { icon: string; color: string; label:
 };
 
 /** Reasoning-effort picker — sits beside the model pill. Default is High. */
-function EffortPicker({ value, onEffort }: { value: string | null; onEffort: (e: string | null) => void }) {
+function EffortPicker({ value, levels, onEffort }: { value: string | null; levels: string[]; onEffort: (e: string | null) => void }) {
   const [open, setOpen] = useState(false);
-  const current = EFFORTS.find((e) => e.id === value) ?? EFFORTS.find((e) => e.id === "high")!;
+  // Only levels this model actually supports (from the SDK catalog).
+  const rows = levels.map((id) => ({ id, ...(EFFORT_META[id] ?? { label: id, sub: "" }) }));
+  const current = rows.find((e) => e.id === value) ?? rows.find((e) => e.id === "high") ?? rows[rows.length - 1];
   return (
     <div style={{ position: "relative" }}>
       <button className="di-btn" onClick={() => setOpen((o) => !o)} title="Reasoning effort" style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 28, padding: "0 11px", border: "1px solid #34608c", borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
@@ -357,7 +526,7 @@ function EffortPicker({ value, onEffort }: { value: string | null; onEffort: (e:
           <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
           <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 230, zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
             <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9 }}>Reasoning effort</div>
-            {EFFORTS.map((e) => {
+            {rows.map((e) => {
               const active = current.id === e.id;
               return (
                 <button key={e.id} className="di-row di-btn" onClick={() => { onEffort(e.id); setOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: "pointer", marginBottom: 2 }}>
@@ -432,6 +601,368 @@ function SearchOverlay({ onSearch, onClose }: { onSearch: (q: string) => Promise
         </div>
       </div>
     </div>
+  );
+}
+
+
+/** Real efficiency instrumentation — every number here is MEASURED from the
+ *  SDK's per-turn usage, never seeded. RTK and caveman are both live features;
+ *  what was missing was honest measurement, so tiles used to show invented
+ *  percentages. A metric with no data says so rather than guessing. */
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+  return String(n);
+}
+
+function EfficiencyPanel({ usage, cavemanSavings, costsAreReal }: { usage: UsageSummary | null; cavemanSavings: string | null; costsAreReal: boolean }) {
+  const has = !!usage && usage.turns > 0;
+  void costsAreReal; // no dollar tile here yet — see LeashPill for the gated one
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <KpiTile eyebrow="Tokens" value={has ? fmtTokens(usage!.inputTokens + usage!.outputTokens) : "—"}
+          unit={has ? `${usage!.turns} turn${usage!.turns === 1 ? "" : "s"}` : "no turns yet"}
+          valueColor="var(--di-info)" border="#23415f" bg="#0f2842" eyebrowColor="var(--di-ink-mute)" />
+        <KpiTile eyebrow="Cache reuse" value={has && usage!.cacheHitPct != null ? `${usage!.cacheHitPct}%` : "—"}
+          unit="prompt cache" valueColor="var(--di-pos)" border="#2a3f2e" bg="#10241a" eyebrowColor="#8fb89a" />
+      </div>
+      {/* Caveman: lifetime savings from its own statusline + a MEASURED
+          per-mode comparison from this session's turns. */}
+      <div style={{ border: "1px solid #6a4a1a", borderRadius: 11, background: "#1a1206", padding: "9px 11px", marginBottom: 8 }}>
+        <div className="di-eyebrow" style={{ color: "#c9a86a", marginBottom: 5, fontSize: 9 }}>Caveman · RTK</div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 6, flexWrap: "wrap" }}>
+          <span className="di-mono" style={{ fontSize: 15, fontWeight: 600, color: "var(--di-warn)" }}>{cavemanSavings ?? "—"}</span>
+          <span style={{ fontSize: 9.5, color: "#a08a5e" }}>lifetime saved</span>
+        </div>
+        {usage?.cavemanDelta ? (
+          <div style={{ fontSize: 10.5, color: "#e9dcc8", marginTop: 6, lineHeight: 1.45 }}>
+            Measured here: <b>{usage.cavemanDelta.outputTokenReductionPct}%</b> fewer output tokens per turn
+            on <b>{usage.cavemanDelta.best}</b> vs <b>{usage.cavemanDelta.worst}</b>.
+          </div>
+        ) : (
+          <div style={{ fontSize: 10, color: "#a08a5e", marginTop: 6, lineHeight: 1.45 }}>
+            Run turns on two different dial settings (3+ each) and the measured token difference appears here.
+          </div>
+        )}
+        {!!usage?.byMode.length && (
+          <div style={{ display: "flex", gap: 5, marginTop: 7, flexWrap: "wrap" }}>
+            {usage.byMode.map((m) => (
+              <span key={m.mode} className="di-mono" style={{ fontSize: 9, color: "#c9a86a", border: "1px solid #4a3a1a", borderRadius: 999, padding: "1px 7px" }}>
+                {m.mode} {Math.round(m.avgOutputTokens)}t/turn ·{m.turns}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+/**
+ * Live context-window accounting, straight from the CLI.
+ *
+ * This is the honest replacement for a "% context saved" figure: there is no
+ * counterfactual anywhere in the SDK for what a turn would have cost without
+ * caveman, so we show what the window ACTUALLY holds and what is filling it.
+ */
+function ContextMeter({ context, limits }: { context: ChatStatus["context"]; limits: ChatState["limits"] }) {
+  if (!context && !limits) return null;
+  const pct = context ? Math.min(100, Math.round(context.percentage)) : 0;
+  // Warn before auto-compact rather than after: compaction is where an agent
+  // quietly forgets the thing you told it forty turns ago.
+  const tone = pct >= 85 ? "var(--di-neg)" : pct >= 65 ? "var(--di-warn)" : "var(--di-info)";
+  const top = context
+    ? [...context.categories].filter((c) => c.tokens > 0).sort((a, b) => b.tokens - a.tokens).slice(0, 3)
+    : [];
+  return (
+    <div style={{ marginBottom: 12, border: "1px solid #23415f", borderRadius: 11, background: "#0f2842", padding: "9px 11px" }}>
+      <div className="di-eyebrow" style={{ marginBottom: 6, fontSize: 9, display: "flex", alignItems: "center", gap: 6 }}>
+        Context window
+        {context && <span className="di-mono" style={{ marginLeft: "auto", color: tone, fontWeight: 600 }}>{pct}%</span>}
+      </div>
+      {context ? (
+        <>
+          <div style={{ height: 5, borderRadius: 999, background: "#12283f", overflow: "hidden", marginBottom: 7 }}>
+            <div style={{ width: `${pct}%`, height: "100%", background: tone }} />
+          </div>
+          <div className="di-mono" style={{ fontSize: 9.5, color: "#6f8296", marginBottom: top.length ? 6 : 0 }}>
+            {fmtTokens(context.totalTokens)} of {fmtTokens(context.maxTokens)}
+            {pct >= 85 ? " · auto-compact is close" : ""}
+          </div>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {top.map((c) => (
+              <span key={c.name} className="di-mono" style={{ fontSize: 9, color: "#93a4b5", border: "1px solid #24384f", borderRadius: 999, padding: "1px 7px" }}>
+                {c.name} {fmtTokens(c.tokens)}
+              </span>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 10.5, color: "#6f8296", lineHeight: 1.45 }}>Starts reporting once Claude Code is running.</div>
+      )}
+      {limits?.utilization != null && (
+        <div style={{ fontSize: 10, color: limits.status === "allowed" ? "#6f8296" : "var(--di-warn)", marginTop: 7, lineHeight: 1.45 }}>
+          Plan window: {Math.round(limits.utilization * 100)}% used
+          {limits.resetsAt ? ` · resets ${new Date(limits.resetsAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Did caveman and RTK actually fire?
+ *
+ * A boolean per hook run, honestly labelled — not a percentage. Nothing is
+ * shown until a hook has actually run, so a session with no hooks configured
+ * says nothing rather than implying failure.
+ */
+function HookLiveness({ hooks }: { hooks: ChatState["hooks"] }) {
+  if (!hooks.length) return null;
+  // Latest run wins per hook name — "did it work last time" is the question.
+  const latest = new Map<string, ChatState["hooks"][number]>();
+  for (const h of hooks) latest.set(h.name, h);
+  const rows = [...latest.values()].slice(-6);
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div className="di-eyebrow" style={{ marginBottom: 6, fontSize: 9 }}>Hooks · last run</div>
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+        {rows.map((h) => {
+          const ok = h.outcome === "success";
+          return (
+            <span key={h.name} title={`${h.event} · exit ${h.exitCode ?? "?"}`} className="di-mono"
+              style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 9, color: ok ? "var(--di-pos)" : "var(--di-neg)",
+                border: `1px solid ${ok ? "#2a3f2e" : "#4a2b2b"}`, borderRadius: 999, padding: "2px 8px" }}>
+              <span style={{ width: 5, height: 5, borderRadius: 999, background: ok ? "var(--di-pos)" : "var(--di-neg)" }} />
+              {h.name}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * How long the agent's leash is — the choice a phone-first reviewer makes
+ * before pocketing the phone. `bypassPermissions` is deliberately not offered:
+ * a review-first IDE has no use for a mode that removes the human.
+ */
+const LEASH: Array<{ id: string; label: string; sub: string }> = [
+  { id: "default", label: "Ask me", sub: "Approve every state change" },
+  { id: "acceptEdits", label: "Auto-accept edits", sub: "File edits go through; commands still ask" },
+  { id: "plan", label: "Plan first", sub: "Propose before touching anything" },
+  { id: "dontAsk", label: "Fail closed", sub: "Deny anything not pre-approved" },
+];
+
+function LeashPill({ mode, readOnly, budgetUsd, maxTurns, costsAreReal, onMode, onReadOnly, onBudget, onMaxTurns }: {
+  mode: string;
+  readOnly: boolean;
+  budgetUsd: number | null;
+  maxTurns: number | null;
+  costsAreReal: boolean;
+  onMode: (m: string) => void;
+  onReadOnly: (on: boolean) => void;
+  onBudget: (usd: number | null) => void;
+  onMaxTurns: (t: number | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [budgetDraft, setBudgetDraft] = useState("");
+  const [turnsDraft, setTurnsDraft] = useState("");
+  const current = LEASH.find((l) => l.id === mode) ?? LEASH[0];
+  const tone = readOnly ? "var(--di-pos)" : mode === "default" ? "var(--di-info)" : "var(--di-warn)";
+  return (
+    <div style={{ position: "relative" }}>
+      <button className="di-btn" onClick={() => setOpen((v) => !v)} aria-expanded={open}
+        style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 28, padding: "0 12px", border: `1px solid ${tone}55`, borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
+        <Icon name={readOnly ? "eye" : mode === "default" ? "shield" : "shield-alert"} size={13} color={tone} />
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>
+          {readOnly ? "Read-only" : current.label}
+        </span>
+        <Icon name="chevron-down" size={13} color="var(--cc-ink-mute)" />
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+          <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 288, zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
+            <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9 }}>How much may Claude do alone?</div>
+            {LEASH.map((l) => {
+              const active = l.id === mode;
+              return (
+                <button key={l.id} className="di-row di-btn" disabled={readOnly}
+                  onClick={() => { onMode(l.id); setOpen(false); }}
+                  style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "9px 11px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: readOnly ? "default" : "pointer", opacity: readOnly ? 0.45 : 1, marginBottom: 2 }}>
+                  <Icon name={active ? "check-circle-2" : "circle"} size={15} color={active ? "var(--di-info)" : "#33475c"} />
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{l.label}</span>
+                    <span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{l.sub}</span>
+                  </span>
+                </button>
+              );
+            })}
+
+            {/* Read-only is not a mode — it REMOVES the mutating tools, so the
+                promise holds even if the model is asked nicely. */}
+            <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 11px", borderTop: "1px solid #17293a", marginTop: 5, cursor: "pointer" }}>
+              <input type="checkbox" checked={readOnly} onChange={(e) => onReadOnly(e.target.checked)} style={{ accentColor: "var(--di-pos)" }} />
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: "block", fontSize: 12, color: "var(--di-ink)" }}>Read-only review</span>
+                <span style={{ display: "block", fontSize: 10.5, color: "#6f8296", lineHeight: 1.4 }}>Write, Edit and Bash are removed from the session — not just discouraged.</span>
+              </span>
+            </label>
+
+            {/* A cheap model can loop for a long time for very little money
+                while producing enormous review churn — so this brake is
+                orthogonal to the spend one, and is offered on every auth. */}
+            <div style={{ padding: "10px 11px", borderTop: "1px solid #17293a" }}>
+              <div className="di-eyebrow" style={{ fontSize: 9, marginBottom: 7 }}>Stop after</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, height: 32, padding: "0 10px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "#0e2032" }}>
+                  <input value={turnsDraft} onChange={(e) => setTurnsDraft(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { const n = Number(turnsDraft); onMaxTurns(Number.isFinite(n) && n > 0 ? n : null); setOpen(false); } }}
+                    placeholder={maxTurns ? String(maxTurns) : "no limit"}
+                    className="di-mono" style={{ flex: 1, minWidth: 0, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 12 }} />
+                  <span style={{ fontSize: 11, color: "#6f8296" }}>turns</span>
+                </div>
+                {maxTurns !== null && (
+                  <button className="di-btn" onClick={() => { onMaxTurns(null); setTurnsDraft(""); }}
+                    style={{ flex: "0 0 auto", height: 32, padding: "0 11px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 11.5, cursor: "pointer" }}>Clear</button>
+                )}
+              </div>
+            </div>
+
+            {costsAreReal ? (
+              <div style={{ padding: "10px 11px", borderTop: "1px solid #17293a" }}>
+                <div className="di-eyebrow" style={{ fontSize: 9, marginBottom: 7 }}>Spend ceiling</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, height: 32, padding: "0 10px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "#0e2032" }}>
+                    <span style={{ fontSize: 12, color: "#6f8296" }}>$</span>
+                    <input value={budgetDraft} onChange={(e) => setBudgetDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { const n = Number(budgetDraft); onBudget(Number.isFinite(n) && n > 0 ? n : null); setOpen(false); } }}
+                      placeholder={budgetUsd ? String(budgetUsd) : "no limit"}
+                      className="di-mono" style={{ flex: 1, minWidth: 0, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 12 }} />
+                  </div>
+                  {budgetUsd !== null && (
+                    <button className="di-btn" onClick={() => { onBudget(null); setBudgetDraft(""); }}
+                      style={{ flex: "0 0 auto", height: 32, padding: "0 11px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 11.5, cursor: "pointer" }}>Clear</button>
+                  )}
+                </div>
+                <div style={{ fontSize: 10, color: "#6f8296", marginTop: 6, lineHeight: 1.4 }}>The turn stops when this is exceeded. Raise it here to continue.</div>
+              </div>
+            ) : (
+              // Never show a dollar ceiling we cannot honestly meter.
+              <div style={{ padding: "10px 11px", borderTop: "1px solid #17293a", fontSize: 10.5, color: "#6f8296", lineHeight: 1.45 }}>
+                Spend ceiling is unavailable on subscription auth — the cost figures the SDK reports are notional there.
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** The approval card. Uses everything the SDK gives us about a tool request:
+ *  blast radius (description), the path that tripped it, why it was asked, and
+ *  a subagent badge — plus two affordances a reviewer actually needs: EDIT the
+ *  arguments (so a wrong `rm` path is fixed, not denied-and-re-prompted) and
+ *  DENY & STOP (end the turn rather than let the agent try another way). */
+function ApprovalCard({
+  m, pending, onApproval,
+}: {
+  m: ChatMsg;
+  pending: boolean;
+  onApproval: (id: string, d: "allow" | "always" | "deny" | "stop", input?: Record<string, unknown>) => void;
+}) {
+  const a = m.approval;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+
+  const startEdit = () => {
+    setDraft(JSON.stringify(a?.input ?? {}, null, 2));
+    setErr(null);
+    setEditing(true);
+  };
+  const allowEdited = () => {
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(draft) as Record<string, unknown>; }
+    catch (e) { setErr(e instanceof Error ? e.message : "invalid JSON"); return; }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) { setErr("must be a JSON object"); return; }
+    onApproval(m.approvalId!, "allow", parsed);
+    setEditing(false);
+  };
+
+  return (
+    <div style={{ alignSelf: "flex-start", border: "1px solid #3a2f18", borderRadius: 9, background: "#181206", padding: "10px 12px", maxWidth: "92%", minWidth: 280 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <Icon name="terminal" size={13} color="#c99a4a" />
+        <span style={{ fontSize: 11.5, color: "#d9c9a6", flex: 1 }}>{m.text}</span>
+        {a?.agentID && (
+          <span style={{ fontSize: 8.5, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--di-info)", border: "1px solid #2c5075", borderRadius: 999, padding: "1px 6px" }}>subagent</span>
+        )}
+      </div>
+      {/* Blast radius — the single most useful thing for a reviewer. */}
+      {a?.description && (
+        <div style={{ fontSize: 10.5, color: "#c9b184", lineHeight: 1.5, marginBottom: 5 }}>{a.description}</div>
+      )}
+      {a?.blockedPath && (
+        <div className="di-mono" style={{ fontSize: 10, color: "var(--di-neg)", marginBottom: 4, wordBreak: "break-all" }}>
+          ⚠ {a.blockedPath}
+        </div>
+      )}
+      {a?.decisionReason && (
+        <div style={{ fontSize: 10, color: "#a08a5e", marginBottom: 6, lineHeight: 1.45 }}>{a.decisionReason}</div>
+      )}
+      {pending && a && !editing && Object.keys(a.input).length > 0 && (
+        <pre className="di-mono" style={{ margin: "0 0 8px", padding: "7px 9px", background: "#0d0904", border: "1px solid #3a2f18", borderRadius: 7, fontSize: 10, color: "#b9a882", maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          {JSON.stringify(a.input, null, 2).slice(0, 1200)}
+        </pre>
+      )}
+      {pending && editing && (
+        <>
+          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} className="di-mono"
+            style={{ width: "100%", minHeight: 110, padding: "7px 9px", background: "#0d0904", border: "1px solid #6a4a1a", borderRadius: 7, color: "#e9dcc8", fontSize: 10.5, outline: "none", resize: "vertical", boxSizing: "border-box", marginBottom: 6 }} />
+          {err && <div style={{ fontSize: 10.5, color: "var(--di-neg)", marginBottom: 6 }}>{err}</div>}
+        </>
+      )}
+      {pending && (
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+          {editing ? (
+            <>
+              <ApprovalBtn label="Run edited" tone="allow" onClick={allowEdited} />
+              <ApprovalBtn label="Cancel" tone="ghost" onClick={() => setEditing(false)} />
+            </>
+          ) : (
+            <>
+              <ApprovalBtn label="Allow" tone="allow" onClick={() => onApproval(m.approvalId!, "allow")} />
+              {a?.canAlways && <ApprovalBtn label="Always" tone="always" onClick={() => onApproval(m.approvalId!, "always")} />}
+              {a && Object.keys(a.input).length > 0 && <ApprovalBtn label="Edit" tone="ghost" onClick={startEdit} />}
+              <ApprovalBtn label="Deny" tone="deny" onClick={() => onApproval(m.approvalId!, "deny")} />
+              <ApprovalBtn label="Deny & stop" tone="stop" onClick={() => onApproval(m.approvalId!, "stop")} />
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ApprovalBtn({ label, tone, onClick }: { label: string; tone: "allow" | "always" | "deny" | "stop" | "ghost"; onClick: () => void }) {
+  const styles: Record<string, React.CSSProperties> = {
+    allow: { background: "#2a6a44", color: "#eafff1", border: 0 },
+    always: { background: "#1f8a5b", color: "#eafff1", border: 0 },
+    deny: { background: "transparent", color: "var(--di-neg)", border: "1px solid #4a2020" },
+    stop: { background: "#4a2020", color: "#ffb3a6", border: "1px solid #6a2a2a" },
+    ghost: { background: "transparent", color: "var(--di-ink-mute)", border: "1px solid var(--di-rule)" },
+  };
+  return (
+    <button className="di-btn" onClick={onClick}
+      style={{ height: 28, padding: "0 12px", borderRadius: 7, cursor: "pointer", fontSize: 11, fontWeight: 600, fontFamily: "inherit", ...styles[tone] }}>
+      {label}
+    </button>
   );
 }
 

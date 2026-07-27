@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Development Intelligence \u2014 agent-first review IDE. Control plane + mobile companion; the IDE (VS Code fork + extension) lives in ide/.",
+  "description": "Development Intelligence — agent-first review IDE. Control plane + mobile companion; the IDE (VS Code fork + extension) lives in ide/.",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:server": "tsx watch server/index.ts",
@@ -14,7 +14,7 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.207",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.220",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "lucide-react": ">=0.475.0 <1.0.0",

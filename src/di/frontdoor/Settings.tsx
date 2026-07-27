@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, clearToken } from "../../api";
+import { api, clearToken, type ChatDiag, type ChatStatus } from "../../api";
 import { Icon } from "../primitives";
 import { THEMES, type Theme } from "../state";
 
@@ -14,8 +14,11 @@ const SECTIONS: { id: Section; label: string; icon: string }[] = [
 /** Settings — one modal, four sections (39a-e). Opened from the nav gear.
  *  Wired to /api/claude-token, /api/claude-auth, /api/mfa/*, /api/doctor,
  *  /api/doctor/repair, and the theme. Reconnect routes back to Connect Claude. */
-export function Settings({ onClose, onReconnect, onSignOut, theme, onTheme }: {
+export function Settings({ onClose, onReconnect, onSignOut, theme, onTheme, sessionId }: {
   onClose: () => void; onReconnect: () => void; onSignOut: () => void; theme: Theme; onTheme: (t: Theme) => void;
+  /** The open session, when there is one — the CLI-level diagnostics below are
+   *  per-session (each has its own Claude Code subprocess). */
+  sessionId?: string | null;
 }) {
   const [section, setSection] = useState<Section>("claude");
   return (
@@ -43,7 +46,7 @@ export function Settings({ onClose, onReconnect, onSignOut, theme, onTheme }: {
           <div className="di-scroll" style={{ flex: 1, padding: "22px 24px" }}>
             {section === "claude" && <ClaudeSection onReconnect={onReconnect} />}
             {section === "security" && <SecuritySection onSignOut={onSignOut} />}
-            {section === "diagnostics" && <DiagnosticsSection />}
+            {section === "diagnostics" && <DiagnosticsSection sessionId={sessionId ?? null} />}
             {section === "appearance" && <AppearanceSection theme={theme} onTheme={onTheme} />}
           </div>
         </div>
@@ -112,7 +115,7 @@ function SecuritySection({ onSignOut }: { onSignOut: () => void }) {
   );
 }
 
-function DiagnosticsSection() {
+function DiagnosticsSection({ sessionId }: { sessionId: string | null }) {
   const [checks, setChecks] = useState<Array<{ id: string; label: string; ok: boolean; detail: string }> | null>(null);
   const [output, setOutput] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -141,7 +144,67 @@ function DiagnosticsSection() {
         {checks === null && <div style={{ padding: 14, color: "var(--di-ink-mute)", fontSize: 12 }}>Loading checks…</div>}
       </div>
       {output && (<><Eb>Repair output</Eb><div className="di-mono" style={{ border: "1px solid #22384a", borderRadius: 10, background: "#0b1622", padding: "11px 13px", fontSize: 11, lineHeight: 1.7, color: "#8fa6b5", whiteSpace: "pre-wrap" }}>{output}</div></>)}
+      {sessionId && <ClaudeCodeDetail sessionId={sessionId} />}
     </>
+  );
+}
+
+/**
+ * CLI-process detail for the open session: who the agent is authenticated as,
+ * which settings sources load (and which deliberately do not), what the CLI
+ * says it has available, and its own stderr. Before this, a misbehaving session
+ * gave DI nothing to show.
+ */
+function ClaudeCodeDetail({ sessionId }: { sessionId: string }) {
+  const [status, setStatus] = useState<ChatStatus | null>(null);
+  const [diag, setDiag] = useState<ChatDiag | null>(null);
+  useEffect(() => {
+    void api.chatStatus(sessionId, true).then(setStatus).catch(() => setStatus(null));
+    void api.chatDiag(sessionId).then(setDiag).catch(() => setDiag(null));
+  }, [sessionId]);
+
+  const acct = status?.account;
+  return (
+    <>
+      <Eb>Claude Code · this session</Eb>
+      <div style={{ border: "1px solid #24384f", borderRadius: 11, background: "#0c1e30", overflow: "hidden", marginBottom: 16 }}>
+        <Row label="Connected as"
+          value={acct?.email ?? (acct?.apiProvider ? `${acct.apiProvider} credentials` : "not started yet")}
+          sub={[acct?.organization, acct?.subscriptionType].filter(Boolean).join(" · ") || null} />
+        <Row label="Cost figures"
+          value={status?.costsAreReal ? "billed rates" : "notional"}
+          sub={status?.costsAreReal ? null : "Subscription and 3P-provider sessions report costs as if billed at API rates."} />
+        <Row label="Settings sources"
+          value={(diag?.settingSources ?? []).join(" + ") || "—"}
+          sub={diag?.settingSourcesNote ?? null} />
+        <Row label="Slash commands" value={String(status?.signals.commands.length ?? 0)} sub={null} />
+        <Row label="Skills" value={String(status?.signals.skills.length ?? 0)} sub={null} />
+        <Row label="MCP servers"
+          value={status?.signals.mcpServers.length ? status.signals.mcpServers.map((m) => `${m.name}:${m.status}`).join(", ") : "none"}
+          sub="A cloned repo's .mcp.json is never auto-connected (strictMcpConfig)." />
+        <Row label="CLI version" value={status?.signals.cliVersion ?? "—"} sub={null} />
+      </div>
+      {!!diag?.stderr.length && (
+        <>
+          <Eb>Claude Code stderr · last {diag.stderr.length} lines</Eb>
+          <div className="di-mono" style={{ border: "1px solid #22384a", borderRadius: 10, background: "#0b1622", padding: "11px 13px", fontSize: 10.5, lineHeight: 1.7, color: "#8fa6b5", whiteSpace: "pre-wrap", maxHeight: 200, overflowY: "auto" }}>
+            {diag.stderr.join("\n")}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+function Row({ label, value, sub }: { label: string; value: string; sub: string | null }) {
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 11, padding: "11px 13px", borderBottom: "1px solid #14283c" }}>
+      <div style={{ flex: "0 0 150px", fontSize: 12, color: "var(--di-ink-soft)" }}>{label}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="di-mono" style={{ fontSize: 11.5, color: "var(--di-ink)", wordBreak: "break-word" }}>{value}</div>
+        {sub && <div style={{ fontSize: 10.5, color: "#6f8296", lineHeight: 1.45, marginTop: 3 }}>{sub}</div>}
+      </div>
+    </div>
   );
 }
 

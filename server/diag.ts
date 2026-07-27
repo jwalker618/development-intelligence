@@ -6,7 +6,7 @@
  */
 export const DIAG_HTML = `<!doctype html>
 <html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>DI · Auth Console</title>
 <link rel="stylesheet" href="/diag/xterm.css">
 <script src="/diag/xterm.js"></script>
@@ -42,6 +42,8 @@ export const DIAG_HTML = `<!doctype html>
   pre { margin: 0; padding: 12px; background: #050c14; border: 1px solid #14212f; border-radius: 9px; font: 11.5px/1.55 ui-monospace, Menlo, monospace; color: #9fb8cf; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
   a { color: #6fb4ff; }
   .muted { color: #6f8296; font-size: 12px; }
+  #term-host { cursor: text; }
+  #term-host:focus-within { border-color: #3a6ea5; box-shadow: 0 0 0 1px #3a6ea5 inset; }
 </style></head>
 <body><div class="wrap">
   <h1>Development Intelligence · Auth Console</h1>
@@ -126,9 +128,21 @@ export const DIAG_HTML = `<!doctype html>
       <button class="btn secondary" onclick="termSend('claude auth status')">Run: claude auth status</button>
       <button class="btn secondary" onclick="termKill()">Kill</button>
       <button class="btn secondary" onclick="termClear()">Clear</button>
+      <span id="term-status" class="muted" style="align-self:center">not connected</span>
     </div>
-    <div id="term-host" style="margin-top:12px;height:360px;background:#000;border:1px solid #14212f;border-radius:9px;padding:6px"></div>
-    <div class="muted" style="margin-top:6px">Type directly in the terminal — it's a real one. Paste works (⌘/Ctrl-V, or long-press on mobile).</div>
+    <div id="term-host" onclick="termFocus()" ontouchend="termFocus()"
+         style="margin-top:12px;height:360px;background:#000;border:1px solid #14212f;border-radius:9px;padding:6px"></div>
+    <div class="btns" style="margin-top:8px;gap:6px">
+      <button class="btn secondary" onclick="termPaste()">Paste</button>
+      <button class="btn secondary" onclick="termKey(String.fromCharCode(13))">Enter</button>
+      <button class="btn secondary" onclick="termKey(ETX)">^C</button>
+      <button class="btn secondary" onclick="termKey(EOT)">^D</button>
+      <button class="btn secondary" onclick="termKey(TAB)">Tab</button>
+      <button class="btn secondary" onclick="termKey(ESC)">Esc</button>
+      <button class="btn secondary" onclick="termKey(ESC+'[A')">↑</button>
+      <button class="btn secondary" onclick="termKey(ESC+'[B')">↓</button>
+    </div>
+    <div class="muted" style="margin-top:6px">Tap the terminal to type. The keys above cover what a phone keyboard can't send; Paste works when the clipboard is blocked.</div>
     <div class="banner" id="term-banner"></div>
   </div>
 
@@ -215,6 +229,9 @@ async function doLogin() {
     banner("login-banner", true, "Logged in. Credential stored (expires " + exp + "). Now run step 3 to confirm.");
     whoami();
     resumeAuth();
+    // On a fresh load there was no credential yet, so the boot-time connect was
+    // skipped — attach now, or the terminal silently swallows every keystroke.
+    termConnect();
   } finally { btn.disabled = false; }
 }
 
@@ -343,7 +360,17 @@ async function resumeAuth() {
 }
 
 // ── terminal (xterm.js — the same component VS Code uses) ───────────────────
-let termWs = null, term = null, fitAddon = null;
+const ESC = String.fromCharCode(27), ETX = String.fromCharCode(3), EOT = String.fromCharCode(4), TAB = String.fromCharCode(9);
+let termWs = null, term = null, fitAddon = null, termRO = null;
+let pendingInput = "";     // keystrokes typed while the socket is down
+let pendingOpen = [];      // callbacks waiting on an in-flight connect
+let retry = 0, retryTimer = null, userClosed = false;
+const MIN_ROWS = 10;
+
+function termStatus(text, tone) {
+  const el = $("term-status");
+  if (el) { el.textContent = text; el.style.color = tone; }
+}
 function termInit() {
   if (term) return term;
   if (!window.Terminal) { banner("term-banner", false, "Terminal component failed to load (/diag/xterm.js)."); return null; }
@@ -352,53 +379,113 @@ function termInit() {
     fontFamily: 'ui-monospace, Menlo, "DejaVu Sans Mono", monospace',
     theme: { background: "#000000", foreground: "#dce6f0" },
   });
-  try {
-    if (window.FitAddon && window.FitAddon.FitAddon) { fitAddon = new window.FitAddon.FitAddon(); term.loadAddon(fitAddon); }
-  } catch {}
+  if (window.FitAddon && window.FitAddon.FitAddon) {
+    try { fitAddon = new window.FitAddon.FitAddon(); term.loadAddon(fitAddon); }
+    catch (e) { log("fit addon failed: " + e); }
+  }
   term.open($("term-host"));
-  termFit();
-  // Every keystroke goes straight to the PTY — this is a real terminal.
-  term.onData((d) => { if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "input", data: d })); });
-  window.addEventListener("resize", termFit);
+  // Never lose a keystroke: queue it if the socket is not up, and revive.
+  term.onData((d) => {
+    if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "input", data: d }));
+    else { pendingInput += d; termConnect(); }
+  });
+  // ONE source of truth for size — catches fit, manual resize and clamping.
+  term.onResize(({ cols, rows }) => {
+    if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "resize", cols, rows }));
+  });
+  // Fit once fonts are measurable, then track the box itself.
+  const settle = () => requestAnimationFrame(termFit);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(settle); else settle();
+  if (window.ResizeObserver) { termRO = new ResizeObserver(() => termFit()); termRO.observe($("term-host")); }
+  if (window.visualViewport) {
+    let vt = null;
+    window.visualViewport.addEventListener("resize", () => { clearTimeout(vt); vt = setTimeout(termFit, 150); });
+  }
   return term;
 }
 function termFit() {
-  if (!fitAddon || !term) return;
-  try {
-    fitAddon.fit();
-    if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "resize", cols: term.cols, rows: term.rows }));
-  } catch {}
+  if (!term) return;
+  if (fitAddon) { try { fitAddon.fit(); } catch (e) { /* zero-size box */ } }
+  // Guard against a ResizeObserver feedback loop: only resize on a real change.
+  if (term.rows < MIN_ROWS && term.cols > 0) { try { term.resize(term.cols, MIN_ROWS); } catch {} }
 }
+function termFocus() { if (term) term.focus(); }
 function termConnect(onOpen) {
   if (!termInit()) return;
   if (termWs && termWs.readyState === 1) { if (onOpen) onOpen(); return; }
+  if (termWs && termWs.readyState === 0) { if (onOpen) pendingOpen.push(onOpen); return; }
   if (!cred()) { banner("term-banner", false, "Log in first (step 2)."); return; }
+  if (onOpen) pendingOpen.push(onOpen);
+  userClosed = false;
+  clearTimeout(retryTimer);
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const url = proto + "//" + location.host + "/api/diag/term?token=" + encodeURIComponent(cred());
   log("WS connect /api/diag/term");
-  termWs = new WebSocket(url);
-  termWs.onopen = () => { log("  -> terminal connected"); if (onOpen) onOpen(); };
-  termWs.onclose = () => { log("  -> terminal disconnected"); termWs = null; };
-  termWs.onerror = () => banner("term-banner", false, "Terminal socket error — is the credential still valid?");
-  termWs.onmessage = (e) => {
+  termStatus("connecting…", "#e0a53a");
+  const ws = new WebSocket(url);
+  termWs = ws;
+  ws.onopen = () => {
+    if (termWs !== ws) return;
+    retry = 0;
+    log("  -> terminal connected");
+    termStatus("connected", "#33c27f");
+    // Replaying scrollback into a dirty screen corrupts it — reset once, here.
+    try { term.reset(); } catch {}
+    // Auto-start: a terminal you cannot type into is the bug we are fixing.
+    ws.send(JSON.stringify({ t: "attach", cols: term.cols, rows: term.rows }));
+    if (pendingInput) { ws.send(JSON.stringify({ t: "input", data: pendingInput })); pendingInput = ""; }
+    const cbs = pendingOpen; pendingOpen = [];
+    for (const cb of cbs) { try { cb(); } catch {} }
+  };
+  ws.onclose = () => {
+    if (termWs !== ws) return;   // a newer socket already took over
+    termWs = null;
+    log("  -> terminal disconnected");
+    if (userClosed) { termStatus("closed", "#6f8296"); return; }
+    const delay = Math.min(1000 * Math.pow(2, retry++), 15000);
+    termStatus("reconnecting in " + Math.round(delay / 1000) + "s…", "#e0a53a");
+    retryTimer = setTimeout(() => termConnect(), delay);
+  };
+  ws.onerror = () => { if (termWs === ws) termStatus("socket error", "#e0523a"); };
+  ws.onmessage = (e) => {
     let f; try { f = JSON.parse(e.data); } catch { return; }
     if (f.t === "hello") {
       if (f.data) term.write(f.data);
       if (f.captured) banner("term-banner", true, "Token already captured: " + f.captured);
-      if (!f.running) term.writeln("\\r\\n\\x1b[33m[no shell running — press Open terminal]\\x1b[0m");
+      termStatus("connected" + (f.backend ? " · " + f.backend : ""), "#33c27f");
       termFit();
     }
     else if (f.t === "data") term.write(f.data);
+    else if (f.t === "started") termStatus("connected · shell running", "#33c27f");
     else if (f.t === "captured") { banner("term-banner", true, "Token captured and registered: " + f.detail + " — now run step 5 to verify."); preflight(); }
     else if (f.t === "capture_failed") banner("term-banner", false, "Saw a token but could not store it: " + f.detail);
     else if (f.t === "cleared") term.clear();
-    else if (f.t === "exit") banner("term-banner", true, "Shell exited (code " + f.code + "). Press Open terminal to start a new one.");
+    else if (f.t === "exit") { termStatus("shell exited (" + f.code + ")", "#e0a53a"); banner("term-banner", true, "Shell exited (code " + f.code + "). Type anything to start a new one."); }
   };
 }
-function termStart() { termConnect(() => { termWs.send(JSON.stringify({ t: "start" })); setTimeout(termFit, 300); term.focus(); banner("term-banner", true, "Terminal ready. Run: claude setup-token"); }); }
-function termSend(cmd) { termConnect(() => { termWs.send(JSON.stringify({ t: "start" })); setTimeout(() => { termWs.send(JSON.stringify({ t: "input", data: cmd + "\\r" })); term.focus(); }, 500); }); }
+function termStart() { termConnect(() => { termFocus(); banner("term-banner", true, "Terminal ready. Run: claude setup-token"); }); }
+function termSend(cmd) {
+  termConnect(() => {
+    termWs.send(JSON.stringify({ t: "input", data: cmd + "\\r" }));
+    termFocus();
+  });
+}
+function termKey(seq) { termConnect(() => { termWs.send(JSON.stringify({ t: "input", data: seq })); termFocus(); }); }
 function termKill() { if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "kill" })); }
 function termClear() { if (term) term.clear(); if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ t: "clear" })); }
+async function termPaste() {
+  // Mobile/permission-safe: race the read so a hung prompt can't freeze the UI.
+  try {
+    const txt = await Promise.race([
+      navigator.clipboard.readText(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 2000)),
+    ]);
+    if (txt) termKey(txt);
+  } catch {
+    const v = prompt("Paste here (clipboard unavailable):");
+    if (v) termKey(v);
+  }
+}
 
 preflight();
 resumeAuth();

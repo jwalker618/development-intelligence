@@ -195,7 +195,11 @@ function mergeClaudeState(cfg: GrottoConfig, patch: (j: Record<string, unknown>)
       /* fresh file */
     }
     patch(j);
-    fs.writeFileSync(p, JSON.stringify(j, null, 2), { mode: 0o600 });
+    // Temp + rename: claude reads this file on every launch, and a partial write
+    // (we can be mid-write while a terminal claude starts) wipes its whole state.
+    const tmp = `${p}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(j, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, p);
   } catch {
     /* best-effort — claude will just show its dialogs */
   }
@@ -209,14 +213,24 @@ export function preseedClaudeConfig(cfg: GrottoConfig): void {
   });
 }
 
-/** Pre-accept the trust dialog for a session workspace we just created. */
-export function trustWorkspace(cfg: GrottoConfig, dir: string): void {
+/** Pre-accept the trust dialog for session workspaces we just created.
+ *  Takes a list because a multi-repo session has several checkouts and each
+ *  read-modify-write of the state file is a chance to clobber a concurrent one. */
+export function trustWorkspaces(cfg: GrottoConfig, dirs: string[]): void {
+  if (!dirs.length) return;
   mergeClaudeState(cfg, (j) => {
     const projects = (j.projects ??= {}) as Record<string, Record<string, unknown>>;
-    projects[dir] = {
-      ...projects[dir],
-      hasTrustDialogAccepted: true,
-      hasCompletedProjectOnboarding: true,
-    };
+    for (const dir of dirs) {
+      projects[dir] = {
+        ...projects[dir],
+        hasTrustDialogAccepted: true,
+        hasCompletedProjectOnboarding: true,
+      };
+    }
   });
+}
+
+/** Single-workspace convenience over {@link trustWorkspaces}. */
+export function trustWorkspace(cfg: GrottoConfig, dir: string): void {
+  trustWorkspaces(cfg, [dir]);
 }
