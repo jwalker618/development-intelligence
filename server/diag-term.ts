@@ -19,18 +19,63 @@ const ANSI_RE =
   /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>]|[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/g;
 const TOKEN_RE = /sk-ant-(?:oat|api)[A-Za-z0-9_-]{20,}/;
 const SCROLLBACK = 40_000;
+/** ANSI-stripped tail kept for token matching — a token is ~108 chars. */
+const CLEAN_TAIL = 8_000;
+const HEARTBEAT_MS = 25_000;
 
 export class DiagTerm {
   private pty: PtyHandle | null = null;
+  /** In-flight spawn: `pty` is assigned only after an await, so without this
+   *  latch two frames in the same tick each spawn a shell and the first becomes
+   *  an orphan that keeps writing into the buffer forever. */
+  private spawning: Promise<void> | null = null;
   private buffer = "";
+  /** Incrementally ANSI-stripped tail; `residue` carries a partial escape
+   *  across chunk boundaries so a split sequence can't corrupt the match. */
+  private clean = "";
+  private residue = "";
   private clients = new Set<WebSocket>();
   private captured: string | null = null;
+  private lastCols = 100;
+  private lastRows = 30;
 
   constructor(private cfg: GrottoConfig) {}
 
   attach(ws: WebSocket): void {
+    // Registered FIRST: a protocol-level frame error emits on the socket, and
+    // an unhandled 'error' would take the process down.
+    ws.on("error", () => {
+      this.clients.delete(ws);
+      try {
+        ws.terminate();
+      } catch {
+        /* already gone */
+      }
+    });
     this.clients.add(ws);
-    ws.send(JSON.stringify({ t: "hello", running: !!this.pty, data: this.buffer, captured: this.captured }));
+
+    const beat = setInterval(() => {
+      try {
+        ws.ping();
+      } catch {
+        /* throws synchronously while CONNECTING */
+      }
+    }, HEARTBEAT_MS);
+    ws.on("close", () => {
+      this.clients.delete(ws);
+      clearInterval(beat);
+    });
+
+    ws.send(
+      JSON.stringify({
+        t: "hello",
+        running: !!this.pty,
+        backend: this.pty?.backend ?? null,
+        data: this.buffer,
+        captured: this.captured,
+      }),
+    );
+
     ws.on("message", (raw) => {
       let m: { t?: string; data?: string; cols?: number; rows?: number };
       try {
@@ -38,50 +83,86 @@ export class DiagTerm {
       } catch {
         return;
       }
-      if (m.t === "start") void this.start();
-      else if (m.t === "input" && typeof m.data === "string") this.pty?.write(m.data);
-      else if (m.t === "resize") this.pty?.resize(m.cols ?? 120, m.rows ?? 30);
-      else if (m.t === "kill") this.stop();
-      else if (m.t === "clear") { this.buffer = ""; this.broadcast({ t: "cleared" }); }
+      if (m.t === "attach" || m.t === "start") {
+        this.remember(m.cols, m.rows);
+        void this.start();
+      } else if (m.t === "input" && typeof m.data === "string") {
+        // Auto-revive: typing into a dead shell should start one, not vanish.
+        if (!this.pty) void this.start().then(() => this.pty?.write(m.data ?? ""));
+        else this.pty.write(m.data);
+      } else if (m.t === "resize") {
+        if (this.remember(m.cols, m.rows)) this.pty?.resize(this.lastCols, this.lastRows);
+      } else if (m.t === "kill") {
+        this.stop();
+      } else if (m.t === "clear") {
+        this.buffer = "";
+        this.clean = "";
+        this.broadcast({ t: "cleared" });
+      }
     });
-    ws.on("close", () => this.clients.delete(ws));
   }
 
-  private async start(): Promise<void> {
-    if (this.pty) return;
-    // No stored credential may shadow a fresh `claude setup-token` mint: a set
-    // (even blank) ANTHROPIC_API_KEY outranks the OAuth token.
-    const env = sessionEnv(this.cfg);
-    delete env.ANTHROPIC_API_KEY;
-    delete env.ANTHROPIC_AUTH_TOKEN;
-    try {
-      // Very wide: a 108-char token (or a long OAuth URL) must never be hard-
-      // wrapped by the PTY, or the capture regex matches only a fragment. The
-      // page renders into a wrapping <pre>, so width costs nothing visually.
-      const pty = await spawnPty({ cwd: this.cfg.home, env, cols: 1000, rows: 40 });
-      this.pty = pty;
-      pty.onData((d) => this.ingest(d));
-      pty.onExit((code) => {
-        if (this.pty === pty) this.pty = null;
-        this.push(`\n[process exited with code ${code}]\n`);
-        this.broadcast({ t: "exit", code });
-      });
-      this.broadcast({ t: "started" });
-    } catch (e) {
-      this.push(`\n[could not start a shell: ${e instanceof Error ? e.message : String(e)}]\n`);
-    }
+  /** Validate + clamp a requested size; only a sane pair updates the memo. */
+  private remember(cols?: number, rows?: number): boolean {
+    if (typeof cols !== "number" || typeof rows !== "number") return false;
+    if (!Number.isFinite(cols) || !Number.isFinite(rows)) return false;
+    const c = Math.round(cols);
+    const r = Math.round(rows);
+    if (c < 20 || r < 5 || c > 500 || r > 200) return false;
+    this.lastCols = c;
+    this.lastRows = r;
+    return true;
+  }
+
+  private start(): Promise<void> {
+    if (this.pty) return Promise.resolve();
+    this.spawning ??= (async () => {
+      // No stored credential may shadow a fresh `claude setup-token` mint: a set
+      // (even blank) ANTHROPIC_API_KEY outranks the OAuth token.
+      const env = sessionEnv(this.cfg);
+      delete env.ANTHROPIC_API_KEY;
+      delete env.ANTHROPIC_AUTH_TOKEN;
+      try {
+        const pty = await spawnPty({
+          cwd: this.cfg.home,
+          env,
+          cols: this.lastCols,
+          rows: this.lastRows,
+        });
+        this.pty = pty;
+        pty.onData((d) => this.ingest(d));
+        pty.onExit((code) => {
+          if (this.pty === pty) this.pty = null;
+          this.push(`\r\n[process exited with code ${code}]\r\n`);
+          this.broadcast({ t: "exit", code });
+        });
+        // The `script` fallback ignores resize(); stty is the only thing that
+        // actually sizes its pty, via TIOCSWINSZ on its controlling terminal.
+        if (pty.backend === "script") pty.write(`stty cols ${this.lastCols} rows ${this.lastRows}\n`);
+        this.broadcast({ t: "started", backend: pty.backend });
+      } catch (e) {
+        this.push(`\r\n[could not start a shell: ${e instanceof Error ? e.message : String(e)}]\r\n`);
+      }
+    })().finally(() => {
+      this.spawning = null;
+    });
+    return this.spawning;
   }
 
   private ingest(raw: string): void {
     // Stream RAW bytes: the client is a real xterm.js terminal, so escape codes
-    // must survive for the TUI to render. (Stripping them is what made Claude's
-    // interactive UI unreadable.)
+    // must survive for the TUI to render.
     this.push(raw);
-    // Auto-capture: setup-token PRINTS the token and does not save it anywhere,
-    // so this is what turns "it appeared on screen" into "it is registered".
     if (this.captured) return;
-    // Match against an ANSI-stripped view so styling can't split the token.
-    const m = this.buffer.replace(ANSI_RE, "").match(TOKEN_RE);
+    // Match against an incrementally stripped tail — Ink emits styling mid-line,
+    // so the token can be split by SGR sequences in the raw stream.
+    const s = this.residue + raw;
+    const cut = s.lastIndexOf("\x1b");
+    // Keep a trailing partial escape (bounded) for the next chunk.
+    const safe = cut >= 0 && s.length - cut < 32 ? s.slice(0, cut) : s;
+    this.residue = cut >= 0 && s.length - cut < 32 ? s.slice(cut) : "";
+    this.clean = (this.clean + safe.replace(ANSI_RE, "")).slice(-CLEAN_TAIL);
+    const m = this.clean.match(TOKEN_RE);
     if (!m) return;
     const token = m[0];
     try {

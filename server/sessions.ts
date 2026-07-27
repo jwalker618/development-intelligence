@@ -91,6 +91,8 @@ type TermMsg =
 
 export class Session {
   pty: PtyHandle | null = null;
+  /** In-flight spawn, so concurrent attaches share one shell (see ensurePty). */
+  private spawning: Promise<PtyHandle> | null = null;
   setup: SetupState = "none";
   private scrollback = "";
   private lastOutputAt: number | null = null;
@@ -142,19 +144,28 @@ export class Session {
    */
   private async ensurePty(): Promise<PtyHandle> {
     if (this.pty) return this.pty;
-    const pty = await spawnPty({
-      cwd: this.dir,
-      env: sessionEnv(this.cfg),
-      cols: 100,
-      rows: 30,
+    // `this.pty` is only assigned AFTER the await, so two sockets attaching in
+    // the same tick would both pass the guard and spawn a shell — the first
+    // becoming an orphan that still feeds broadcast(). Latch the in-flight
+    // promise so concurrent callers share one spawn.
+    this.spawning ??= (async () => {
+      const pty = await spawnPty({
+        cwd: this.dir,
+        env: sessionEnv(this.cfg),
+        cols: 100,
+        rows: 30,
+      });
+      pty.onData((d) => this.broadcast({ t: "out", d }));
+      pty.onExit((code) => {
+        if (this.pty === pty) this.pty = null;
+        this.broadcast({ t: "exit", code });
+      });
+      this.pty = pty;
+      return pty;
+    })().finally(() => {
+      this.spawning = null;
     });
-    pty.onData((d) => this.broadcast({ t: "out", d }));
-    pty.onExit((code) => {
-      this.pty = null;
-      this.broadcast({ t: "exit", code });
-    });
-    this.pty = pty;
-    return pty;
+    return this.spawning;
   }
 
   async attach(ws: WebSocket): Promise<void> {

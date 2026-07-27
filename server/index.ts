@@ -700,31 +700,58 @@ const server = http.createServer(async (req, res) => {
 
 // ── WebSocket upgrades: terminal, preview, HMR fallback ─────────────────────
 
-const wss = new WebSocketServer({ noServer: true });
+// maxPayload: ws defaults to 100 MiB and every frame we receive is JSON.parsed —
+// cap it so a single large frame can't exhaust memory.
+const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+// A malformed frame (e.g. RSV1 set) makes ws emit 'error' on the WebSocket; with
+// no listener that is an uncaught exception which kills the process — and
+// restartPolicyType:ON_FAILURE then turns it into a restart loop that destroys
+// every live session. One listener per socket, registered BEFORE any attach.
+wss.on("error", () => undefined);
+function guardSocket(ws: import("ws").WebSocket): void {
+  ws.on("error", () => {
+    try {
+      ws.terminate();
+    } catch {
+      /* already gone */
+    }
+  });
+}
+
+/** Reject an unauthorized upgrade, counting it against the login throttle.
+ *  Without this the WS upgrade is an unthrottled, unlogged oracle for guessing
+ *  GROTTO_TOKEN — and a hit on /api/diag/term yields a root shell. */
+function denyUpgrade(socket: import("node:stream").Duplex): void {
+  throttle.fail();
+  socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+  socket.destroy();
+}
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", "http://local");
 
   // Admin terminal for /diag — a real shell, no repo session required.
   if (url.pathname === "/api/diag/term") {
-    if (!authorized(req, url.searchParams)) {
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-      socket.destroy();
+    if (throttle.locked() || !authorized(req, url.searchParams)) {
+      denyUpgrade(socket);
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => diagTerm.attach(ws));
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      guardSocket(ws);
+      diagTerm.attach(ws);
+    });
     return;
   }
 
   const term = url.pathname.match(/^\/api\/sessions\/([^/]+)\/term$/);
   if (term) {
-    if (!authorized(req, url.searchParams)) {
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-      socket.destroy();
+    if (throttle.locked() || !authorized(req, url.searchParams)) {
+      denyUpgrade(socket);
       return;
     }
     const id = term[1];
     wss.handleUpgrade(req, socket, head, (ws) => {
+      guardSocket(ws);
       try {
         void manager.get(id).attach(ws);
       } catch {
@@ -736,13 +763,13 @@ server.on("upgrade", (req, socket, head) => {
 
   const chat = url.pathname.match(/^\/api\/sessions\/([^/]+)\/chat$/);
   if (chat) {
-    if (!authorized(req, url.searchParams)) {
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-      socket.destroy();
+    if (throttle.locked() || !authorized(req, url.searchParams)) {
+      denyUpgrade(socket);
       return;
     }
     const id = chat[1];
     wss.handleUpgrade(req, socket, head, (ws) => {
+      guardSocket(ws);
       try {
         const s = manager.get(id);
         chats.get(s.id, s.dir).attach(ws);
@@ -753,9 +780,8 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
 
-  if (!authorized(req, url.searchParams)) {
-    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-    socket.destroy();
+  if (throttle.locked() || !authorized(req, url.searchParams)) {
+    denyUpgrade(socket);
     return;
   }
 
