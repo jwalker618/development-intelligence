@@ -42,6 +42,9 @@ export interface Change {
   moved?: boolean;
   kind?: "approval" | "file";
   hunks?: Hunk[];
+  /** Which checkout this file lives in — the `?repo=` handle. Undefined means
+   *  the primary, which is every change in a single-repo session. */
+  repo?: string;
 }
 
 export interface TimelineTick {

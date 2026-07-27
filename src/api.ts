@@ -10,6 +10,18 @@ export interface SessionInfo {
   lastLine: string | null;
   lastOutputAt: number | null;
   model: string | null;
+  /** Every checkout in the session. `repos[0]` is the primary and mirrors the
+   *  `repo`/`branch` fields above. Absent from a pre-multi-repo server. */
+  repos?: RepoRef[];
+}
+
+/** One checkout inside a session. `name` is the handle used in `?repo=`. */
+export interface RepoRef {
+  repo: string;
+  branch: string | null;
+  name: string;
+  status: "cloning" | "ready" | "failed";
+  error?: string;
 }
 
 export interface CavemanStatus {
@@ -34,6 +46,16 @@ export interface GitStatus {
   ahead: number;
   behind: number;
   entries: Array<{ status: string; path: string }>;
+  /** Present only when asked for with `all` — one entry per checkout, in slot
+   *  order. The top-level fields above always mirror `repos[0]`. */
+  repos?: RepoStatus[];
+}
+
+export interface RepoStatus extends GitStatus {
+  name: string;
+  repo: string;
+  /** Set when this checkout could not be read (failed clone, corrupt tree). */
+  error?: string;
 }
 
 export interface GitLogEntry {
@@ -151,6 +173,11 @@ export function clearToken(): void {
   localStorage.removeItem(LEGACY_KEY);
 }
 
+/** `&repo=<name>` when targeting a secondary checkout, otherwise nothing (the
+ *  server then uses the primary). Always emitted with a leading `&`, so every
+ *  call site can append it to a query string that may already be empty. */
+const qRepo = (repo?: string): string => (repo ? `&repo=${encodeURIComponent(repo)}` : "");
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -246,39 +273,50 @@ export const api = {
     req("/api/claude-token", { method: "PUT", body: JSON.stringify({ token }) }),
   clearClaudeToken: () => req("/api/claude-token", { method: "DELETE" }),
   sessions: () => req<SessionInfo[]>("/api/sessions"),
-  createSession: (repo: string, branch: string) =>
+  /** The first entry becomes the primary checkout (the agent's cwd). */
+  createSession: (repos: Array<{ repo: string; branch: string | null }>) =>
     req<SessionInfo>("/api/sessions", {
+      method: "POST",
+      body: JSON.stringify({ repos }),
+    }),
+  addRepo: (id: string, repo: string, branch: string | null) =>
+    req<SessionInfo>(`/api/sessions/${id}/repos`, {
       method: "POST",
       body: JSON.stringify({ repo, branch: branch || undefined }),
     }),
+  removeRepo: (id: string, name: string) =>
+    req<SessionInfo>(`/api/sessions/${id}/repos/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
   deleteSession: (id: string) => req(`/api/sessions/${id}`, { method: "DELETE" }),
-  files: (id: string, path: string) =>
-    req<DirEntry[]>(`/api/sessions/${id}/files?path=${encodeURIComponent(path)}`),
-  tree: (id: string) => req<{ files: string[] }>(`/api/sessions/${id}/tree`),
-  file: (id: string, path: string) =>
-    req<FileContent>(`/api/sessions/${id}/file?path=${encodeURIComponent(path)}`),
-  saveFile: (id: string, path: string, content: string) =>
-    req(`/api/sessions/${id}/file`, {
+  files: (id: string, path: string, repo?: string) =>
+    req<DirEntry[]>(`/api/sessions/${id}/files?path=${encodeURIComponent(path)}${qRepo(repo)}`),
+  tree: (id: string, repo?: string) =>
+    req<{ files: string[] }>(`/api/sessions/${id}/tree?${qRepo(repo).slice(1)}`),
+  file: (id: string, path: string, repo?: string) =>
+    req<FileContent>(`/api/sessions/${id}/file?path=${encodeURIComponent(path)}${qRepo(repo)}`),
+  saveFile: (id: string, path: string, content: string, repo?: string) =>
+    req(`/api/sessions/${id}/file?${qRepo(repo).slice(1)}`, {
       method: "PUT",
       body: JSON.stringify({ path, content }),
     }),
-  deletePath: (id: string, path: string) =>
-    req(`/api/sessions/${id}/file?path=${encodeURIComponent(path)}`, {
+  deletePath: (id: string, path: string, repo?: string) =>
+    req(`/api/sessions/${id}/file?path=${encodeURIComponent(path)}${qRepo(repo)}`, {
       method: "DELETE",
     }),
-  move: (id: string, from: string, to: string) =>
-    req(`/api/sessions/${id}/file/move`, {
+  move: (id: string, from: string, to: string, repo?: string) =>
+    req(`/api/sessions/${id}/file/move?${qRepo(repo).slice(1)}`, {
       method: "POST",
       body: JSON.stringify({ from, to }),
     }),
-  mkdir: (id: string, path: string) =>
-    req(`/api/sessions/${id}/mkdir`, {
+  mkdir: (id: string, path: string, repo?: string) =>
+    req(`/api/sessions/${id}/mkdir?${qRepo(repo).slice(1)}`, {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
-  upload: async (id: string, path: string, file: File) => {
+  upload: async (id: string, path: string, file: File, repo?: string) => {
     const res = await fetch(
-      `/api/sessions/${id}/upload?path=${encodeURIComponent(path)}`,
+      `/api/sessions/${id}/upload?path=${encodeURIComponent(path)}${qRepo(repo)}`,
       {
         method: "POST",
         headers: {
@@ -293,19 +331,24 @@ export const api = {
       throw new Error(data.error ?? `HTTP ${res.status}`);
     }
   },
-  stat: (id: string, paths: string[]) =>
+  stat: (id: string, paths: string[], repo?: string) =>
     req<Array<{ path: string; bytes: number | null }>>(
-      `/api/sessions/${id}/stat?paths=${encodeURIComponent(paths.join(","))}`,
+      `/api/sessions/${id}/stat?paths=${encodeURIComponent(paths.join(","))}${qRepo(repo)}`,
     ),
-  gitStatus: (id: string) => req<GitStatus>(`/api/sessions/${id}/git/status`),
-  gitLog: (id: string) => req<{ entries: GitLogEntry[] }>(`/api/sessions/${id}/git/log`),
-  gitDiff: (id: string, path?: string) =>
+  /** `all` folds every checkout into `repos[]` in one round trip. */
+  gitStatus: (id: string, opts?: { repo?: string; all?: boolean }) =>
+    req<GitStatus>(
+      `/api/sessions/${id}/git/status?${opts?.all ? "all=1" : ""}${qRepo(opts?.repo)}`,
+    ),
+  gitLog: (id: string, repo?: string) =>
+    req<{ entries: GitLogEntry[] }>(`/api/sessions/${id}/git/log?${qRepo(repo).slice(1)}`),
+  gitDiff: (id: string, path?: string, repo?: string) =>
     req<{ diff: string }>(
-      `/api/sessions/${id}/git/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`,
+      `/api/sessions/${id}/git/diff?${path ? `path=${encodeURIComponent(path)}` : ""}${qRepo(repo)}`,
     ),
-  gitDiffSemantic: (id: string, path: string) =>
+  gitDiffSemantic: (id: string, path: string, repo?: string) =>
     req<SpanDiffResponse>(
-      `/api/sessions/${id}/git/diff/semantic?path=${encodeURIComponent(path)}`,
+      `/api/sessions/${id}/git/diff/semantic?path=${encodeURIComponent(path)}${qRepo(repo)}`,
     ),
   searchTranscript: (id: string, q: string) =>
     req<{ hits: SearchHit[] }>(
@@ -352,8 +395,9 @@ export const api = {
   gitOp: (
     id: string,
     body: { op: string; message?: string; branch?: string; sha?: string },
+    repo?: string,
   ) =>
-    req<{ output: string }>(`/api/sessions/${id}/git`, {
+    req<{ output: string }>(`/api/sessions/${id}/git?${qRepo(repo).slice(1)}`, {
       method: "POST",
       body: JSON.stringify(body),
     }),

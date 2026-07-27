@@ -269,7 +269,7 @@ function NewSessionSheet({
     setError(null);
     setRepo(target);
     try {
-      const s = await api.createSession(target, branch.trim());
+      const s = await api.createSession([{ repo: target, branch: branch.trim() || null }]);
       onCreated(s.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

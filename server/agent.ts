@@ -70,6 +70,17 @@ function blockText(content: unknown): string {
   return "";
 }
 
+/** The slice of a Session the agent needs. Structural, so a Session satisfies
+ *  it directly and `extraDirs` stays LIVE — adding a repo mid-session changes
+ *  what the next query sees without re-registering the chat. */
+export interface Workspace {
+  readonly id: string;
+  /** Primary checkout — the agent's cwd. */
+  readonly dir: string;
+  /** Secondary checkouts, handed to the SDK as additionalDirectories. */
+  readonly extraDirs: string[];
+}
+
 /** One headless Claude Code conversation, bound to a session workspace. */
 export class AgentChat {
   private events: ChatEvent[] = [];
@@ -96,8 +107,7 @@ export class AgentChat {
 
   constructor(
     private cfg: GrottoConfig,
-    readonly sessionId: string,
-    private dir: string,
+    private ws: Workspace,
   ) {
     this.ledger = new UsageLedger(cfg);
     fs.mkdirSync(this.chatDir, { recursive: true });
@@ -108,10 +118,10 @@ export class AgentChat {
     return path.join(this.cfg.home, "chat");
   }
   private get logPath(): string {
-    return path.join(this.chatDir, `${this.sessionId}.jsonl`);
+    return path.join(this.chatDir, `${this.ws.id}.jsonl`);
   }
   private get metaPath(): string {
-    return path.join(this.chatDir, `${this.sessionId}.meta.json`);
+    return path.join(this.chatDir, `${this.ws.id}.meta.json`);
   }
 
   private load(): void {
@@ -228,7 +238,7 @@ export class AgentChat {
   }
 
   usage(): ReturnType<UsageLedger["summarize"]> {
-    return this.ledger.summarize(this.sessionId);
+    return this.ledger.summarize(this.ws.id);
   }
 
   get effort(): EffortLevel | null {
@@ -248,16 +258,22 @@ export class AgentChat {
   async setEffort(effort: EffortLevel | null): Promise<void> {
     this.meta.effort = effort ?? undefined;
     this.saveMeta();
-    if (this.q && !this.busy) {
-      const q = this.q;
-      this.q = null;
-      // interrupt() ends the TURN; close() ends the PROCESS. Without the close
-      // every effort change leaked a Claude CLI subprocess for the container's
-      // lifetime.
-      await q.interrupt().catch(() => undefined);
-      try { await q.close?.(); } catch { /* already gone */ }
-    }
+    await this.recycle();
     this.broadcast({ t: "effort", effort });
+  }
+
+  /** Drop an IDLE query so the next turn rebuilds it with current creation-time
+   *  options (effort, additionalDirectories). Resume keeps the conversation, so
+   *  this is invisible to the user. A busy query is left alone — recycling
+   *  mid-turn would lose the in-flight reply. */
+  async recycle(): Promise<void> {
+    if (!this.q || this.busy) return;
+    const q = this.q;
+    this.q = null;
+    // interrupt() ends the TURN; close() ends the PROCESS. Without the close
+    // every recycle leaked a Claude CLI subprocess for the container's lifetime.
+    await q.interrupt().catch(() => undefined);
+    try { await q.close?.(); } catch { /* already gone */ }
   }
 
   async interrupt(): Promise<void> {
@@ -328,7 +344,10 @@ export class AgentChat {
     const q = query({
       prompt: inputs(),
       options: {
-        cwd: this.dir,
+        cwd: this.ws.dir,
+        // Multi-repo: the agent can read and edit every checkout in the session,
+        // not just its cwd. Snapshotted at query build — see recycle().
+        ...(this.ws.extraDirs.length ? { additionalDirectories: [...this.ws.extraDirs] } : {}),
         env,
         resume: this.meta.claudeSessionId,
         model: this.meta.model,
@@ -443,7 +462,7 @@ export class AgentChat {
                 mode,
                 this.active ?? this.meta.model ?? null,
               );
-              this.ledger.record(this.sessionId, turn);
+              this.ledger.record(this.ws.id, turn);
               this.emit("result", {
                 ok: msg.subtype === "success",
                 costUsd: "total_cost_usd" in msg ? msg.total_cost_usd : null,
@@ -453,7 +472,7 @@ export class AgentChat {
                 cacheReadTokens: turn.cacheReadTokens,
                 mode,
               });
-              this.broadcast({ t: "usage", summary: this.ledger.summarize(this.sessionId) });
+              this.broadcast({ t: "usage", summary: this.ledger.summarize(this.ws.id) });
               this.setBusy(false);
               break;
             }
@@ -477,11 +496,11 @@ export class AgentChats {
 
   constructor(private cfg: GrottoConfig) {}
 
-  get(sessionId: string, dir: string): AgentChat {
-    let chat = this.chats.get(sessionId);
+  get(ws: Workspace): AgentChat {
+    let chat = this.chats.get(ws.id);
     if (!chat) {
-      chat = new AgentChat(this.cfg, sessionId, dir);
-      this.chats.set(sessionId, chat);
+      chat = new AgentChat(this.cfg, ws);
+      this.chats.set(ws.id, chat);
     }
     return chat;
   }

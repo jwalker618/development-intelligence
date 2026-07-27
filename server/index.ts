@@ -54,6 +54,17 @@ const throttle = new LoginThrottle();
 const router = new Router();
 const webRoot = path.resolve(import.meta.dirname, "../dist/web");
 
+/**
+ * Which checkout does this request target? A session can hold several repos;
+ * `?repo=<name>` selects one, and its absence means the primary. Every file and
+ * git route goes through here so a single-repo session behaves exactly as before
+ * and a multi-repo one can never fall back to the wrong tree silently (an
+ * unknown name is a 404, not the primary).
+ */
+function slotDir(id: string, query: URLSearchParams): string {
+  return manager.get(id).slot(query.get("repo")).dir;
+}
+
 // ── API ─────────────────────────────────────────────────────────────────────
 
 router.on("GET", "/api/health", () => ({ ok: true }));
@@ -267,7 +278,7 @@ router.on("POST", "/api/sessions/:id/chat/message", ({ params, body }) => {
   const text = b.text?.trim();
   if (!text) throw new HttpError(400, "text is required");
   const s = manager.get(params.id);
-  chats.get(s.id, s.dir).send(text);
+  chats.get(s).send(text);
   return { ok: true };
 });
 
@@ -286,14 +297,14 @@ router.on("POST", "/api/sessions/:id/chat/approval", ({ params, body }) => {
     edited = b.input as Record<string, unknown>;
   }
   const s = manager.get(params.id);
-  const ok = chats.get(s.id, s.dir).resolveApproval(b.id, b.decision as ApprovalDecision, edited);
+  const ok = chats.get(s).resolveApproval(b.id, b.decision as ApprovalDecision, edited);
   if (!ok) throw new HttpError(409, "that request is no longer pending");
   return { ok: true };
 });
 
 router.on("POST", "/api/sessions/:id/chat/interrupt", async ({ params }) => {
   const s = manager.get(params.id);
-  await chats.get(s.id, s.dir).interrupt();
+  await chats.get(s).interrupt();
   return { ok: true };
 });
 
@@ -330,7 +341,7 @@ router.on("POST", "/api/sessions/:id/chat/model", async ({ params, body }) => {
     }
   }
   const s = manager.get(params.id);
-  await chats.get(s.id, s.dir).setModel(model);
+  await chats.get(s).setModel(model);
   return { ok: true };
 });
 
@@ -338,7 +349,7 @@ const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 /** Real per-turn usage ledger — the honest basis for the efficiency tiles. */
 router.on("GET", "/api/sessions/:id/usage", ({ params }) => {
   const s = manager.get(params.id);
-  return chats.get(s.id, s.dir).usage();
+  return chats.get(s).usage();
 });
 
 router.on("POST", "/api/sessions/:id/chat/effort", async ({ params, body }) => {
@@ -346,14 +357,64 @@ router.on("POST", "/api/sessions/:id/chat/effort", async ({ params, body }) => {
   const e = b.effort?.trim() || null;
   if (e && !EFFORTS.includes(e as (typeof EFFORTS)[number])) throw new HttpError(400, "invalid effort");
   const s = manager.get(params.id);
-  await chats.get(s.id, s.dir).setEffort(e as (typeof EFFORTS)[number] | null);
+  await chats.get(s).setEffort(e as (typeof EFFORTS)[number] | null);
   return { ok: true };
 });
 
+/** Max checkouts per session. Each is a full clone on the volume and another
+ *  root the agent searches, so this is a real resource bound, not a UI taste. */
+const MAX_REPOS = 6;
+
+/** Accepts BOTH shapes: v1 `{repo, branch}` and v2 `{repos: [{repo, branch}]}`.
+ *  The first entry becomes the primary (the agent's cwd). */
 router.on("POST", "/api/sessions", async ({ body }) => {
+  const b = (body ?? {}) as {
+    repo?: string;
+    branch?: string;
+    repos?: Array<{ repo?: string; branch?: string } | string>;
+  };
+  const raw = Array.isArray(b.repos) && b.repos.length
+    ? b.repos
+    : b.repo
+      ? [{ repo: b.repo, branch: b.branch }]
+      : [];
+  if (!raw.length) throw new HttpError(400, "repo (or repos[]) is required");
+  if (raw.length > MAX_REPOS) throw new HttpError(400, `at most ${MAX_REPOS} repos per session`);
+  const specs = raw.map((r) => {
+    const spec = typeof r === "string" ? { repo: r, branch: b.branch } : r;
+    if (!spec?.repo || typeof spec.repo !== "string") throw new HttpError(400, "each repo needs a name");
+    return { repo: spec.repo.trim(), branch: spec.branch?.trim() || null };
+  });
+  // Cloning the same repo twice would give the agent two divergent copies of
+  // one codebase — always a mistake, never an intent.
+  const dupes = specs.map((s) => s.repo).filter((r, i, a) => a.indexOf(r) !== i);
+  if (dupes.length) throw new HttpError(400, `repeated repo: ${dupes[0]}`);
+  const session = await manager.create(specs);
+  return session.info();
+});
+
+// ── repos in a session (multi-repo) ─────────────────────────────────────────
+
+router.on("POST", "/api/sessions/:id/repos", async ({ params, body }) => {
   const b = (body ?? {}) as { repo?: string; branch?: string };
   if (!b.repo) throw new HttpError(400, "repo is required");
-  const session = await manager.create(b.repo, b.branch?.trim() || null);
+  const session = manager.get(params.id);
+  if (session.repos.length >= MAX_REPOS) {
+    throw new HttpError(400, `at most ${MAX_REPOS} repos per session`);
+  }
+  if (session.repos.some((r) => r.repo === b.repo)) {
+    throw new HttpError(409, `${b.repo} is already in this session`);
+  }
+  await manager.addRepo(params.id, b.repo.trim(), b.branch?.trim() || null);
+  // The agent's additionalDirectories are fixed at query creation. Recycle an
+  // idle query so the very next turn can actually see the new checkout.
+  await chats.peek(params.id)?.recycle();
+  return session.info();
+});
+
+router.on("DELETE", "/api/sessions/:id/repos/:name", async ({ params }) => {
+  const session = manager.removeRepo(params.id, params.name);
+  await chats.peek(params.id)?.recycle();
   return session.info();
 });
 
@@ -388,46 +449,46 @@ router.on("GET", "/api/sessions/:id/transcript/search", ({ params, query }) => (
 // ── files ───────────────────────────────────────────────────────────────────
 
 router.on("GET", "/api/sessions/:id/files", ({ params, query }) =>
-  listDir(manager.get(params.id).dir, query.get("path") ?? ""),
+  listDir(slotDir(params.id, query), query.get("path") ?? ""),
 );
 
-router.on("GET", "/api/sessions/:id/tree", ({ params }) => ({
-  files: listTree(manager.get(params.id).dir),
+router.on("GET", "/api/sessions/:id/tree", ({ params, query }) => ({
+  files: listTree(slotDir(params.id, query)),
 }));
 
 router.on("GET", "/api/sessions/:id/file", ({ params, query }) => {
   const p = query.get("path");
   if (!p) throw new HttpError(400, "path is required");
-  return readFile(manager.get(params.id).dir, p);
+  return readFile(slotDir(params.id, query), p);
 });
 
-router.on("PUT", "/api/sessions/:id/file", ({ params, body }) => {
+router.on("PUT", "/api/sessions/:id/file", ({ params, query, body }) => {
   const b = (body ?? {}) as { path?: string; content?: string };
   if (!b.path || typeof b.content !== "string") {
     throw new HttpError(400, "path and content are required");
   }
-  writeFile(manager.get(params.id).dir, b.path, b.content);
+  writeFile(slotDir(params.id, query), b.path, b.content);
   return { ok: true };
 });
 
 router.on("DELETE", "/api/sessions/:id/file", ({ params, query }) => {
   const p = query.get("path");
   if (!p) throw new HttpError(400, "path is required");
-  deletePath(manager.get(params.id).dir, p);
+  deletePath(slotDir(params.id, query), p);
   return { ok: true };
 });
 
-router.on("POST", "/api/sessions/:id/file/move", ({ params, body }) => {
+router.on("POST", "/api/sessions/:id/file/move", ({ params, query, body }) => {
   const b = (body ?? {}) as { from?: string; to?: string };
   if (!b.from || !b.to) throw new HttpError(400, "from and to are required");
-  movePath(manager.get(params.id).dir, b.from, b.to);
+  movePath(slotDir(params.id, query), b.from, b.to);
   return { ok: true };
 });
 
-router.on("POST", "/api/sessions/:id/mkdir", ({ params, body }) => {
+router.on("POST", "/api/sessions/:id/mkdir", ({ params, query, body }) => {
   const b = (body ?? {}) as { path?: string };
   if (!b.path) throw new HttpError(400, "path is required");
-  makeDir(manager.get(params.id).dir, b.path);
+  makeDir(slotDir(params.id, query), b.path);
   return { ok: true };
 });
 
@@ -438,7 +499,7 @@ router.on(
     const p = query.get("path");
     if (!p) throw new HttpError(400, "path is required");
     if (!Buffer.isBuffer(body)) throw new HttpError(400, "raw body required");
-    writeFileRaw(manager.get(params.id).dir, p, body);
+    writeFileRaw(slotDir(params.id, query), p, body);
     return { ok: true, path: p, bytes: body.length };
   },
   { raw: true },
@@ -446,22 +507,46 @@ router.on(
 
 router.on("GET", "/api/sessions/:id/stat", ({ params, query }) => {
   const paths = (query.get("paths") ?? "").split(",").filter(Boolean);
-  return statPaths(manager.get(params.id).dir, paths);
+  return statPaths(slotDir(params.id, query), paths);
 });
 
 // ── git ─────────────────────────────────────────────────────────────────────
 
-router.on("GET", "/api/sessions/:id/git/status", async ({ params }) => {
-  const dir = manager.get(params.id).dir;
+async function statusOf(dir: string) {
   const r = assertOk(
     await runGit(dir, ["status", "--porcelain=v2", "--branch"], gitEnv(cfg)),
     "status",
   );
   return parseStatus(r.stdout);
+}
+
+/**
+ * `?all=1` returns every checkout at once — one round trip for the Changes
+ * screen instead of N. The top level still mirrors the PRIMARY repo verbatim,
+ * so a v1 client reading `{branch, ahead, behind, entries}` is unaffected.
+ */
+router.on("GET", "/api/sessions/:id/git/status", async ({ params, query }) => {
+  if (query.get("all") !== "1") return statusOf(slotDir(params.id, query));
+  const session = manager.get(params.id);
+  const per = await Promise.all(
+    session.repos.map(async (slot) => {
+      // A failed clone has no working tree — report it instead of 500ing the
+      // whole screen because one of six repos didn't come down.
+      if (slot.status !== "ready") {
+        return { name: slot.name, repo: slot.repo, branch: slot.branch, ahead: 0, behind: 0, entries: [], error: slot.error ?? "not ready" };
+      }
+      try {
+        return { name: slot.name, repo: slot.repo, ...(await statusOf(slot.dir)) };
+      } catch (e) {
+        return { name: slot.name, repo: slot.repo, branch: slot.branch, ahead: 0, behind: 0, entries: [], error: e instanceof Error ? e.message : String(e) };
+      }
+    }),
+  );
+  return { ...per[0], repos: per };
 });
 
-router.on("GET", "/api/sessions/:id/git/log", async ({ params }) => {
-  const dir = manager.get(params.id).dir;
+router.on("GET", "/api/sessions/:id/git/log", async ({ params, query }) => {
+  const dir = slotDir(params.id, query);
   const r = assertOk(
     await runGit(dir, ["log", "--format=%h%x1f%s%x1f%cr%x1e", "-n", "50"], gitEnv(cfg)),
     "log",
@@ -478,7 +563,7 @@ router.on("GET", "/api/sessions/:id/git/log", async ({ params }) => {
 });
 
 router.on("GET", "/api/sessions/:id/git/diff", async ({ params, query }) => {
-  const dir = manager.get(params.id).dir;
+  const dir = slotDir(params.id, query);
   const p = query.get("path");
   const args = p ? ["diff", "HEAD", "--", p] : ["diff", "HEAD"];
   let r = await runGit(dir, args, gitEnv(cfg));
@@ -495,7 +580,7 @@ router.on("GET", "/api/sessions/:id/git/diff", async ({ params, query }) => {
  * ops + move blocks (see server/spandiff.ts), not a raw unified-diff string.
  */
 router.on("GET", "/api/sessions/:id/git/diff/semantic", async ({ params, query }) => {
-  const dir = manager.get(params.id).dir;
+  const dir = slotDir(params.id, query);
   const p = query.get("path");
   if (!p) throw new HttpError(400, "path required");
   // Old side: HEAD:path. A new/untracked file has no HEAD blob → empty.
@@ -525,8 +610,8 @@ function autoMessage(entries: Array<{ path: string }>): string {
 
 const out = (r: GitResult) => (r.stdout + r.stderr).trim();
 
-router.on("POST", "/api/sessions/:id/git", async ({ params, body }) => {
-  const dir = manager.get(params.id).dir;
+router.on("POST", "/api/sessions/:id/git", async ({ params, query, body }) => {
+  const dir = slotDir(params.id, query);
   const env = gitEnv(cfg);
   const b = (body ?? {}) as { op?: string; message?: string; branch?: string; sha?: string };
   switch (b.op) {
@@ -818,7 +903,7 @@ server.on("upgrade", (req, socket, head) => {
       guardSocket(ws);
       try {
         const s = manager.get(id);
-        chats.get(s.id, s.dir).attach(ws);
+        chats.get(s).attach(ws);
       } catch {
         ws.close(4004, "no such session");
       }

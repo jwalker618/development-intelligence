@@ -1,5 +1,5 @@
-import { useState, type CSSProperties, type ReactNode } from "react";
-import type { SessionInfo } from "../api";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { api, type RepoRef, type SessionInfo } from "../api";
 import { Icon } from "./primitives";
 import { VIEWS, THEMES, type View, type Theme } from "./state";
 
@@ -8,6 +8,10 @@ export interface FrameProps {
   theme: Theme; onTheme: (t: Theme) => void;
   repoCount: number; screen: ReactNode;
   sessions: SessionInfo[]; currentSessionId: string | null;
+  /** Checkouts in the CURRENT session, primary first. */
+  repos: RepoRef[];
+  onAddRepo: (repo: string, branch: string | null) => Promise<void>;
+  onRemoveRepo: (name: string) => Promise<void>;
   onSwitchSession: (id: string) => void;
   onNewSession: () => void;
   onAllSessions: () => void;
@@ -78,6 +82,9 @@ function NavDropdown({ p, onClose }: { p: FrameProps; onClose: () => void }) {
           </button>
         </div>
 
+        {/* repos in this session */}
+        <ReposSection p={p} />
+
         {/* views */}
         <div style={{ padding: "9px 13px", borderTop: "1px solid #17293a" }}>
           <div className="di-eyebrow" style={{ padding: "2px 4px 9px", fontSize: 9 }}>This session</div>
@@ -116,6 +123,100 @@ function NavDropdown({ p, onClose }: { p: FrameProps; onClose: () => void }) {
         )}
       </div>
     </>
+  );
+}
+
+/** Max checkouts per session — mirrors the server bound. */
+const MAX_REPOS = 6;
+
+/**
+ * The session's repositories. Adding one clones it alongside the primary and
+ * hands it to the agent as an extra working directory, so the next turn can
+ * read and edit across both. The primary can't be removed — it is the agent's
+ * cwd and the session's identity.
+ */
+function ReposSection({ p }: { p: FrameProps }) {
+  const [adding, setAdding] = useState(false);
+  const [query, setQuery] = useState("");
+  const [available, setAvailable] = useState<string[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!adding || available.length) return;
+    void api.repos().then((r) => setAvailable(r.repos)).catch(() => setAvailable([]));
+  }, [adding, available.length]);
+
+  const inSession = p.repos.map((r) => r.repo);
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const hits = available.filter((r) => r.toLowerCase().includes(q) && !inSession.includes(r));
+    const typed = query.trim();
+    if (/^[\w.-]+\/[\w.-]+$/.test(typed) && !hits.includes(typed) && !inSession.includes(typed)) hits.unshift(typed);
+    return hits.slice(0, 4);
+  }, [query, available, inSession.join(",")]);
+
+  const run = async (label: string, fn: () => Promise<void>) => {
+    setBusy(label); setError(null);
+    try { await fn(); setQuery(""); setAdding(false); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(null); }
+  };
+
+  if (!p.repos.length) return null;
+  return (
+    <div style={{ padding: "9px 13px", borderTop: "1px solid #17293a" }}>
+      <div className="di-eyebrow" style={{ padding: "2px 4px 8px", fontSize: 9 }}>
+        Repositories · {p.repos.length}
+      </div>
+      {p.repos.map((r, i) => (
+        <div key={r.name} style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 9px", borderRadius: 8, marginBottom: 3, background: i === 0 ? "#0e2032" : "transparent", border: `1px solid ${i === 0 ? "#1d3b4f" : "transparent"}` }}>
+          <Icon name="folder-git-2" size={13} color={r.status === "failed" ? "var(--di-neg)" : i === 0 ? "var(--di-spot)" : "var(--di-info)"} />
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span className="di-mono" style={{ display: "block", fontSize: 11.5, color: "var(--di-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.repo}</span>
+            <span style={{ display: "block", fontSize: 9.5, color: r.status === "failed" ? "var(--di-neg)" : "#6f8296", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {r.status === "failed" ? (r.error ?? "clone failed") : `${r.branch ?? "default branch"}${i === 0 ? " · primary" : ""}`}
+            </span>
+          </span>
+          {i > 0 && (
+            <button className="di-btn" aria-label={`Remove ${r.repo}`} title="Remove from session" disabled={busy !== null}
+              onClick={() => void run(r.name, () => p.onRemoveRepo(r.name))}
+              style={{ border: 0, background: "transparent", cursor: busy ? "default" : "pointer", padding: 2, display: "flex", opacity: busy === r.name ? 0.4 : 1 }}>
+              <Icon name="x" size={13} color="var(--di-ink-mute)" />
+            </button>
+          )}
+        </div>
+      ))}
+
+      {error && <div style={{ fontSize: 10.5, color: "var(--di-neg)", padding: "4px 5px", lineHeight: 1.45 }}>{error}</div>}
+
+      {p.repos.length < MAX_REPOS && (adding ? (
+        <div style={{ marginTop: 4 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, height: 34, padding: "0 10px", border: "1px solid #2c5075", borderRadius: 8, background: "#0a1c2e" }}>
+            <Icon name="search" size={13} color="var(--di-info)" />
+            <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} spellCheck={false}
+              disabled={busy !== null}
+              onKeyDown={(e) => { if (e.key === "Enter" && matches[0]) void run(matches[0], () => p.onAddRepo(matches[0], null)); if (e.key === "Escape") setAdding(false); }}
+              placeholder={busy ? "Cloning…" : "owner/repo"}
+              className="di-mono" style={{ flex: 1, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 11.5 }} />
+          </div>
+          {matches.map((m) => (
+            <button key={m} className="di-row di-btn" disabled={busy !== null} onClick={() => void run(m, () => p.onAddRepo(m, null))}
+              style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 10px", borderRadius: 8, border: 0, background: "transparent", cursor: "pointer", marginTop: 2 }}>
+              <Icon name="plus" size={12} color="var(--di-info)" />
+              <span className="di-mono" style={{ fontSize: 11, color: "var(--di-ink-soft)", flex: 1, minWidth: 0, textAlign: "left", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m}</span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <button className="di-btn" onClick={() => setAdding(true)}
+          style={{ display: "flex", alignItems: "center", gap: 9, width: "100%", padding: "7px 9px", borderRadius: 8, marginTop: 2, border: 0, background: "transparent", cursor: "pointer" }}>
+          <Icon name="plus" size={13} color="var(--di-info)" />
+          <span style={{ fontSize: 11.5, color: "var(--di-info)", flex: 1, textAlign: "left" }}>Add repository</span>
+        </button>
+      ))}
+    </div>
   );
 }
 

@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { WebSocket } from "ws";
-import { gitEnv, sessionEnv, trustWorkspace, type GrottoConfig } from "./config.js";
+import { gitEnv, sessionEnv, trustWorkspaces, type GrottoConfig } from "./config.js";
 import { assertOk, runGit } from "./git.js";
 import { HttpError } from "./http.js";
 import { spawnPty, type PtyHandle } from "./pty.js";
@@ -30,6 +30,18 @@ export interface SessionInfo {
   lastOutputAt: number | null;
   /** Claude model last reported by the statusline wrapper for this workspace. */
   model: string | null;
+  /** Every checkout in the session; `repos[0]` is the primary (and mirrors the
+   *  `repo`/`branch` fields above, which stay for v1 clients). */
+  repos: RepoRef[];
+}
+
+/** A session's checkout as seen by clients — no server paths. */
+export interface RepoRef {
+  repo: string;
+  branch: string | null;
+  name: string;
+  status: "cloning" | "ready" | "failed";
+  error?: string;
 }
 
 /** Read the model recorded by scripts/grotto-statusline.sh for a session. */
@@ -98,14 +110,51 @@ export class Session {
   private lastOutputAt: number | null = null;
   private sockets = new Set<WebSocket>();
 
+  readonly repos: RepoSlot[];
+
   constructor(
     readonly id: string,
-    readonly repo: string,
-    readonly branch: string | null,
-    readonly dir: string,
+    repos: RepoSlot[],
     private cfg: GrottoConfig,
     readonly createdAt = Date.now(),
-  ) {}
+  ) {
+    if (!repos.length) throw new Error("session needs at least one repo");
+    this.repos = repos;
+  }
+
+  /** The primary checkout — the agent's cwd, and what every v1 caller means. */
+  get primary(): RepoSlot {
+    return this.repos[0];
+  }
+  get repo(): string {
+    return this.primary.repo;
+  }
+  get branch(): string | null {
+    return this.primary.branch;
+  }
+  get dir(): string {
+    return this.primary.dir;
+  }
+  /** Extra checkouts handed to the SDK as additionalDirectories. */
+  get extraDirs(): string[] {
+    return this.repos.slice(1).filter((r) => r.status === "ready").map((r) => r.dir);
+  }
+  /** Resolve a ?repo= name to a slot; null/absent means the primary. */
+  slot(name: string | null): RepoSlot {
+    if (!name) return this.primary;
+    const found = this.repos.find((r) => r.name === name);
+    if (!found) throw new HttpError(404, `no such repo in session: ${name}`);
+    return found;
+  }
+  addSlot(slot: RepoSlot): void {
+    this.repos.push(slot);
+  }
+  removeSlot(name: string): RepoSlot {
+    const i = this.repos.findIndex((r) => r.name === name);
+    if (i < 0) throw new HttpError(404, `no such repo in session: ${name}`);
+    if (i === 0) throw new HttpError(400, "cannot remove the primary repository");
+    return this.repos.splice(i, 1)[0];
+  }
 
   info(): SessionInfo {
     const tail = this.scrollback.slice(-4000);
@@ -124,6 +173,9 @@ export class Session {
       lastLine: lastNonEmptyLine(tail),
       lastOutputAt: this.lastOutputAt,
       model: readModel(this.cfg.claudeConfigDir, this.id),
+      repos: this.repos.map((r) => ({
+        repo: r.repo, branch: r.branch, name: r.name, status: r.status, ...(r.error ? { error: r.error } : {}),
+      })),
     };
   }
 
@@ -220,14 +272,47 @@ export class Session {
   destroy(): void {
     this.pty?.kill();
     for (const ws of this.sockets) ws.close();
-    fs.rmSync(this.dir, { recursive: true, force: true });
+    for (const r of this.repos) fs.rmSync(r.dir, { recursive: true, force: true });
   }
 }
 
 const REPO_RE = /^[\w.-]+\/[\w.-]+$/;
 
+/** Short label for a checkout: the repo's name segment, filesystem-safe.
+ *  Used in the workspace directory name, in `?repo=` and in the UI. */
+export function slotName(repo: string): string {
+  const tail = repo.split("/").pop() ?? repo;
+  const safe = tail.replace(/[^\w.-]/g, "-").replace(/^[.-]+/, "").slice(0, 40);
+  return safe || "repo";
+}
+
+/** slotName, disambiguated against names already taken in this session.
+ *  Two repos can share a name segment (acme/api and beta/api) — the second
+ *  becomes "api-2". Mutates `used`. */
+export function uniqueName(repo: string, used: Set<string>): string {
+  const base = slotName(repo);
+  let name = base;
+  for (let n = 2; used.has(name); n++) name = `${base}-${n}`;
+  used.add(name);
+  return name;
+}
+
+/** One checkout inside a session. A session's FIRST slot is the primary: its
+ *  dir is the agent's cwd; the rest are passed as additionalDirectories. */
+export interface RepoSlot {
+  repo: string;
+  branch: string | null;
+  dir: string;
+  /** Short unique label used in URLs and the UI (usually the repo name). */
+  name: string;
+  status: "cloning" | "ready" | "failed";
+  error?: string;
+}
+
 interface RegistryEntry {
   id: string;
+  /** v2. Older registries carry only the v1 fields below. */
+  repos?: RepoSlot[];
   repo: string;
   branch: string | null;
   dir: string;
@@ -256,17 +341,32 @@ export class SessionManager {
     } catch {
       return;
     }
+    const base = path.join(this.cfg.home, "sessions") + path.sep;
     for (const e of entries) {
-      if (!e?.id || !e.dir || !fs.existsSync(e.dir)) continue;
-      this.sessions.set(e.id, new Session(e.id, e.repo, e.branch, e.dir, this.cfg, e.createdAt));
-      trustWorkspace(this.cfg, e.dir);
+      if (!e?.id) continue;
+      // v2 registries carry `repos`; v1 carries only {repo,branch,dir}. Read both.
+      const raw: RepoSlot[] = Array.isArray(e.repos) && e.repos.length
+        ? e.repos
+        : e.dir
+          ? [{ repo: e.repo, branch: e.branch, dir: e.dir, name: slotName(e.repo), status: "ready" }]
+          : [];
+      // Containment: never adopt a dir outside the sessions root (a tampered
+      // registry must not point the agent at an arbitrary path).
+      const live = raw.filter((r) => r.dir.startsWith(base) && fs.existsSync(r.dir));
+      // A missing PRIMARY drops the session; a missing EXTRA just prunes that slot.
+      if (!live.length || live[0].dir !== raw[0]?.dir) continue;
+      this.sessions.set(e.id, new Session(e.id, live, this.cfg, e.createdAt));
+      trustWorkspaces(this.cfg, live.map((r) => r.dir));
     }
     this.save(); // prune entries whose workspace vanished
   }
 
   private save(): void {
+    // Dual-write: v2 `repos` plus the v1 mirror, so an older build can still
+    // read the registry (and so a rollback doesn't orphan every workspace).
     const entries: RegistryEntry[] = [...this.sessions.values()].map((s) => ({
       id: s.id,
+      repos: s.repos,
       repo: s.repo,
       branch: s.branch,
       dir: s.dir,
@@ -291,33 +391,95 @@ export class SessionManager {
     return s;
   }
 
-  async create(repo: string, branch: string | null): Promise<Session> {
-    if (!REPO_RE.test(repo)) throw new HttpError(400, "repo must be owner/name");
-    if (branch && !/^[\w./-]+$/.test(branch)) throw new HttpError(400, "bad branch name");
-
-    const id = crypto.randomBytes(4).toString("hex");
-    const dir = path.join(this.cfg.home, "sessions", id);
+  /** Clone one repo into `dir`. Cleans up a partial checkout on failure. */
+  private async cloneInto(repo: string, branch: string | null, dir: string): Promise<void> {
     const env = gitEnv(this.cfg);
     // Username-only in the URL; the password comes from GIT_ASKPASS so the
     // token never lands in .git/config.
     const url = this.cfg.gitToken
       ? `https://x-access-token@github.com/${repo}.git`
       : `https://github.com/${repo}.git`;
-    assertOk(await runGit(this.cfg.home, ["clone", url, dir], env, 600_000), "clone");
-    if (branch) {
-      const existing = await runGit(dir, ["checkout", branch], env);
-      if (existing.code !== 0) {
-        assertOk(await runGit(dir, ["checkout", "-b", branch], env), "checkout -b");
+    try {
+      assertOk(await runGit(this.cfg.home, ["clone", url, dir], env, 600_000), "clone");
+      if (branch) {
+        const existing = await runGit(dir, ["checkout", branch], env);
+        if (existing.code !== 0) {
+          assertOk(await runGit(dir, ["checkout", "-b", branch], env), "checkout -b");
+        }
+      }
+    } catch (e) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      throw e;
+    }
+  }
+
+  private validate(repo: string, branch: string | null): void {
+    if (!REPO_RE.test(repo)) throw new HttpError(400, "repo must be owner/name");
+    if (branch && !/^[\w./-]+$/.test(branch)) throw new HttpError(400, "bad branch name");
+  }
+
+  /** Create a session from one or more repos. The FIRST becomes the primary
+   *  (the agent's cwd); the rest are additional directories. A failing extra
+   *  clone is recorded as a failed slot rather than sinking the session. */
+  async create(specs: Array<{ repo: string; branch: string | null }>): Promise<Session> {
+    if (!specs.length) throw new HttpError(400, "at least one repo is required");
+    for (const sp of specs) this.validate(sp.repo, sp.branch);
+
+    const id = crypto.randomBytes(4).toString("hex");
+    const slots: RepoSlot[] = [];
+    const used = new Set<string>();
+    for (const [i, sp] of specs.entries()) {
+      const name = uniqueName(sp.repo, used);
+      // Siblings, never nested: a checkout inside another would show up in the
+      // parent's `git status`, tree listing and `git add -A`.
+      const dir = path.join(this.cfg.home, "sessions", `${id}__${name}`);
+      try {
+        await this.cloneInto(sp.repo, sp.branch, dir);
+        slots.push({ repo: sp.repo, branch: sp.branch, dir, name, status: "ready" });
+      } catch (e) {
+        // The primary must succeed — without it there is no session at all.
+        if (i === 0) throw e;
+        slots.push({
+          repo: sp.repo, branch: sp.branch, dir, name, status: "failed",
+          error: e instanceof Error ? e.message : String(e),
+        });
       }
     }
 
-    const session = new Session(id, repo, branch, dir, this.cfg);
+    const session = new Session(id, slots, this.cfg);
     this.sessions.set(id, session);
     this.save();
-    // Terminal claude in this fresh workspace must not open with a full-screen
-    // trust dialog — pre-accept it (headless SDK sessions never show one).
-    trustWorkspace(this.cfg, dir);
+    // Terminal claude in these fresh workspaces must not open with a full-screen
+    // trust dialog — pre-accept them (headless SDK sessions never show one).
+    trustWorkspaces(this.cfg, slots.filter((r) => r.status === "ready").map((r) => r.dir));
     if (this.cfg.sessionSetup) session.runSetup(this.cfg.sessionSetup);
+    return session;
+  }
+
+  /** Add a repo to a live session. */
+  async addRepo(id: string, repo: string, branch: string | null): Promise<Session> {
+    const session = this.get(id);
+    this.validate(repo, branch);
+    const used = new Set(session.repos.map((r) => r.name));
+    const name = uniqueName(repo, used);
+    const dir = path.join(this.cfg.home, "sessions", `${id}__${name}`);
+    await this.cloneInto(repo, branch, dir);
+    session.addSlot({ repo, branch, dir, name, status: "ready" });
+    this.save();
+    trustWorkspaces(this.cfg, [dir]);
+    return session;
+  }
+
+  /** Remove a non-primary repo and delete its checkout. */
+  removeRepo(id: string, name: string): Session {
+    const session = this.get(id);
+    const slot = session.removeSlot(name);
+    try {
+      fs.rmSync(slot.dir, { recursive: true, force: true });
+    } catch {
+      /* the slot is gone from the model either way */
+    }
+    this.save();
     return session;
   }
 

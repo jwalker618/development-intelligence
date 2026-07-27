@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type ModelRow, type SearchHit, type SessionInfo, type UsageSummary } from "../api";
+import { api, type ModelRow, type RepoRef, type SearchHit, type SessionInfo, type UsageSummary } from "../api";
 import {
-  SAMPLE, buildTree, mapSpanDiff, parseDiff, setCavemanMode, subscribeChat, toChanges, toDialMode, toTimeline,
+  SAMPLE, buildTree, changeKey, mapSpanDiff, parseDiff, setCavemanMode, subscribeChat, toChanges, toDialMode, toTimeline,
   type ChatMsg, type ChatState, type Move, type TreeNode,
 } from "./control";
 import { seedState, type CavemanMode, type Hunk, type SessionState, type Verdict } from "./state";
@@ -14,8 +14,13 @@ export interface Live {
   chat: ChatState;
   models: ModelRow[] | null;
   usage: UsageSummary | null;
+  /** One root per checkout. Single-repo sessions have exactly one. */
+  trees: TreeNode[];
+  /** The primary checkout's tree — what every single-repo caller means. */
   tree: TreeNode | null;
-  activeDiff: { path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null;
+  /** Checkouts in this session, primary first. Empty until the session loads. */
+  repos: RepoRef[];
+  activeDiff: { path: string; repo?: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null;
   cavemanSavings: string | null;
   sample: typeof SAMPLE;
   conn: Conn;
@@ -26,9 +31,12 @@ export interface Live {
 export interface Actions {
   setCaveman: (m: CavemanMode) => void;
   commitSync: () => void;
-  selectChange: (path: string) => void;
-  markReviewed: (path: string) => void;
+  /** `repo` is the checkout handle; omit it for the primary. */
+  selectChange: (path: string, repo?: string) => void;
+  markReviewed: (path: string, repo?: string) => void;
   setVerdict: (path: string, hunk: number, v: Verdict) => void;
+  addRepo: (repo: string, branch: string | null) => Promise<void>;
+  removeRepo: (name: string) => Promise<void>;
   sendMessage: (text: string) => void;
   resolveApproval: (id: string, decision: "allow" | "always" | "deny" | "stop", input?: Record<string, unknown>) => void;
   interrupt: () => void;
@@ -49,8 +57,9 @@ export function useControl(sessionId: string | null): Live {
   const [state, setState] = useState<SessionState>(seedState);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [chat, setChat] = useState<ChatState>({ messages: [], busy: false, model: null, activeModel: null, effort: null, pendingApprovalId: null });
-  const [tree, setTree] = useState<TreeNode | null>(null);
-  const [activeDiff, setActiveDiff] = useState<{ path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null>(null);
+  const [trees, setTrees] = useState<TreeNode[]>([]);
+  const [repos, setRepos] = useState<RepoRef[]>([]);
+  const [activeDiff, setActiveDiff] = useState<{ path: string; repo?: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null>(null);
   const [cavemanSavings, setCavemanSavings] = useState<string | null>(null);
   const [models, setModels] = useState<ModelRow[] | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
@@ -66,17 +75,34 @@ export function useControl(sessionId: string | null): Live {
 
   const loadSession = useCallback(async (id: string) => {
     try {
-      const [cav, git, log, treeRes, list, pinsRes, usageRes] = await Promise.all([
-        api.caveman(), api.gitStatus(id), api.gitLog(id), api.tree(id), api.sessions(), api.pins(id), api.usage(id).catch(() => null),
+      const [cav, git, log, list, pinsRes, usageRes] = await Promise.all([
+        api.caveman(), api.gitStatus(id, { all: true }), api.gitLog(id), api.sessions(), api.pins(id), api.usage(id).catch(() => null),
       ]);
       setSessions(list);
       if (usageRes) setUsage(usageRes);
       const info = list.find((s) => s.id === id);
+      // A pre-multi-repo server omits `repos` — synthesise the single slot so
+      // the rest of the UI has exactly one shape to render.
+      const slots: RepoRef[] = info?.repos?.length
+        ? info.repos
+        : info
+          ? [{ repo: info.repo, branch: info.branch, name: info.repo.split("/").pop() ?? "repo", status: "ready" }]
+          : [];
+      setRepos(slots);
       setCavemanSavings(cav.savings);
-      setTree(buildTree(treeRes.files, info?.repo ?? "repo"));
+      // One tree per READY checkout. A failed clone has nothing to list; asking
+      // for it would 404 and take the whole Files screen down with it.
+      const ready = slots.filter((r) => r.status === "ready");
+      const roots = await Promise.all(
+        ready.map(async (r, i) => {
+          const res = await api.tree(id, i === 0 ? undefined : r.name).catch(() => ({ files: [] as string[] }));
+          return buildTree(res.files, r.name);
+        }),
+      );
+      setTrees(roots);
       setState((prev) => ({
         ...prev,
-        repoCount: list.length || 1,
+        repoCount: slots.length || 1,
         branch: git.branch || prev.branch,
         ahead: git.ahead, behind: git.behind,
         caveman: { mode: toDialMode(cav.mode), savedPct: prev.caveman.savedPct },
@@ -142,20 +168,55 @@ export function useControl(sessionId: string | null): Live {
         catch (e) { guard(e); }
       })();
     },
-    commitSync: () => { if (sessionId) void api.gitOp(sessionId, { op: "sync" }).then(() => loadSession(sessionId)).catch(guard); },
-    selectChange: (path) => {
+    // Sync EVERY checkout that has changes, not just the primary — in a
+    // multi-repo session the agent's work is routinely spread across them, and
+    // committing one silently would leave the rest behind. With no changes
+    // anywhere we still sync the primary, so the button can push ahead commits.
+    commitSync: () => {
       if (!sessionId) return;
-      void api.gitDiffSemantic(sessionId, path)
-        .then((res) => { const m = mapSpanDiff(res); setActiveDiff({ path, ...m }); })
+      const dirty = new Set(state.changes.filter((c) => c.kind !== "approval").map((c) => c.repo));
+      const targets = dirty.size ? [...dirty] : [undefined];
+      void (async () => {
+        const failures: string[] = [];
+        // Sequential: these are pushes to the same remote host, and a partial
+        // failure must name the repo that failed rather than a merged rejection.
+        for (const repo of targets) {
+          try { await api.gitOp(sessionId, { op: "sync" }, repo); }
+          catch (e) {
+            if (is401(e)) { setConn("reauth"); return; }
+            failures.push(`${repo ?? repos[0]?.name ?? "repo"}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        await loadSession(sessionId);
+        setError(failures.length ? failures.join(" · ") : null);
+      })();
+    },
+    selectChange: (path, repo) => {
+      if (!sessionId) return;
+      void api.gitDiffSemantic(sessionId, path, repo)
+        .then((res) => { const m = mapSpanDiff(res); setActiveDiff({ path, repo, ...m }); })
         // Fall back to the plain line diff if the semantic engine errors on this file.
         .catch((e) => {
           if (is401(e)) { setConn("reauth"); return; }
-          void api.gitDiff(sessionId, path)
-            .then(({ diff }) => setActiveDiff({ path, hunks: parseDiff(diff), moves: [], truncated: false, binary: false }))
+          void api.gitDiff(sessionId, path, repo)
+            .then(({ diff }) => setActiveDiff({ path, repo, hunks: parseDiff(diff), moves: [], truncated: false, binary: false }))
             .catch(guard);
         });
     },
-    markReviewed: (path) => { reviewed.current.add(path); setState((p) => ({ ...p, changes: p.changes.map((c) => c.path === path ? { ...c, reviewed: true } : c) })); },
+    markReviewed: (path, repo) => {
+      reviewed.current.add(changeKey({ path, repo }));
+      setState((p) => ({ ...p, changes: p.changes.map((c) => c.path === path && c.repo === repo ? { ...c, reviewed: true } : c) }));
+    },
+    addRepo: async (repo, branch) => {
+      if (!sessionId) return;
+      try { await api.addRepo(sessionId, repo, branch); await loadSession(sessionId); }
+      catch (e) { guard(e); throw e; }
+    },
+    removeRepo: async (name) => {
+      if (!sessionId) return;
+      try { await api.removeRepo(sessionId, name); await loadSession(sessionId); }
+      catch (e) { guard(e); throw e; }
+    },
     setVerdict: (path, hunk, v) => setActiveDiff((d) => d && d.path === path ? { ...d, hunks: d.hunks.map((h, i) => i === hunk ? { ...h, verdict: h.verdict === v ? null : v } : h) } : d),
     sendMessage: (text) => { if (sessionId && text.trim()) void api.chatMessage(sessionId, text).catch(guard); },
     resolveApproval: (id, decision, input) => { if (sessionId) void api.chatApproval(sessionId, id, decision, input).catch(guard); },
@@ -181,7 +242,7 @@ export function useControl(sessionId: string | null): Live {
     refresh: () => { if (sessionId) void loadSession(sessionId); },
   };
 
-  return { state, sessions, chat, models, usage, tree, activeDiff, cavemanSavings, sample: SAMPLE, conn, error, actions };
+  return { state, sessions, chat, models, usage, trees, tree: trees[0] ?? null, repos, activeDiff, cavemanSavings, sample: SAMPLE, conn, error, actions };
 }
 
 function foldOne(ev: { kind?: string; [k: string]: unknown }): ChatMsg[] {
