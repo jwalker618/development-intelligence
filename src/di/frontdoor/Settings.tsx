@@ -126,7 +126,11 @@ function DiagnosticsSection({ sessionId }: { sessionId: string | null }) {
   return (
     <>
       <H>Diagnostics</H>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+      {/* The session's own Claude Code detail leads: it is what someone opens
+          Diagnostics to read. The DI health checks below are a different
+          question (is the container provisioned) and can wait their turn. */}
+      {sessionId && <ClaudeCodeDetail sessionId={sessionId} />}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, marginTop: 22 }}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 26, padding: "0 11px", borderRadius: 999, background: issues ? "#1a1206" : "#0d2417", border: `1px solid ${issues ? "#5a3316" : "#234a2e"}`, fontSize: 11, color: issues ? "var(--di-warn)" : "var(--di-pos)" }}>
           <Icon name={issues ? "alert-triangle" : "check-circle-2"} size={12} />{checks === null ? "checking…" : issues ? `${issues} issue${issues > 1 ? "s" : ""} found` : "all healthy"}
         </span>
@@ -144,65 +148,126 @@ function DiagnosticsSection({ sessionId }: { sessionId: string | null }) {
         {checks === null && <div style={{ padding: 14, color: "var(--di-ink-mute)", fontSize: 12 }}>Loading checks…</div>}
       </div>
       {output && (<><Eb>Repair output</Eb><div className="di-mono" style={{ border: "1px solid #22384a", borderRadius: 10, background: "#0b1622", padding: "11px 13px", fontSize: 11, lineHeight: 1.7, color: "#8fa6b5", whiteSpace: "pre-wrap" }}>{output}</div></>)}
-      {sessionId && <ClaudeCodeDetail sessionId={sessionId} />}
     </>
   );
 }
 
 /**
- * CLI-process detail for the open session: who the agent is authenticated as,
- * which settings sources load (and which deliberately do not), what the CLI
- * says it has available, and its own stderr. Before this, a misbehaving session
- * gave DI nothing to show.
+ * Claude Code, this session (46d).
+ *
+ * Designed to be READ IN A BUG REPORT. A label-value table cannot say "this is
+ * the row that is wrong", so: a status glyph per row, healthy rows stay one
+ * line, and anything amber or red expands with its explanation in place. The
+ * stderr disclosure has a Copy all that produces the block a bug report needs.
  */
 function ClaudeCodeDetail({ sessionId }: { sessionId: string }) {
   const [status, setStatus] = useState<ChatStatus | null>(null);
   const [diag, setDiag] = useState<ChatDiag | null>(null);
+  const [showErr, setShowErr] = useState(false);
+  const [copied, setCopied] = useState(false);
   useEffect(() => {
     void api.chatStatus(sessionId, true).then(setStatus).catch(() => setStatus(null));
     void api.chatDiag(sessionId).then(setDiag).catch(() => setDiag(null));
   }, [sessionId]);
 
   const acct = status?.account;
+  const cold = !status;
+  const sig = status?.signals;
+
+  const copyAll = () => {
+    const block = [
+      `session ${sessionId}`,
+      `cli ${sig?.cliVersion ?? "unknown"}`,
+      `account ${acct?.email ?? acct?.apiProvider ?? "unknown"}`,
+      `costs ${status?.costsAreReal ? "billed" : "notional"}`,
+      `settings ${(diag?.settingSources ?? []).join("+")}`,
+      `inventory ${sig?.commands.length ?? 0} commands · ${sig?.skills.length ?? 0} skills · ${sig?.mcpServers.length ?? 0} mcp`,
+      "",
+      ...(diag?.stderr ?? []),
+    ].join("\n");
+    void navigator.clipboard?.writeText(block).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => undefined);
+  };
+
+  const errCount = (diag?.stderr ?? []).filter((l) => /error|fail|exit [1-9]/i.test(l)).length;
+
   return (
     <>
-      <Eb>Claude Code · this session</Eb>
-      <div style={{ border: "1px solid #24384f", borderRadius: 11, background: "#0c1e30", overflow: "hidden", marginBottom: 16 }}>
-        <Row label="Connected as"
-          value={acct?.email ?? (acct?.apiProvider ? `${acct.apiProvider} credentials` : "not started yet")}
-          sub={[acct?.organization, acct?.subscriptionType].filter(Boolean).join(" · ") || null} />
-        <Row label="Cost figures"
-          value={status?.costsAreReal ? "billed rates" : "notional"}
-          sub={status?.costsAreReal ? null : "Subscription and 3P-provider sessions report costs as if billed at API rates."} />
-        <Row label="Settings sources"
-          value={(diag?.settingSources ?? []).join(" + ") || "—"}
-          sub={diag?.settingSourcesNote ?? null} />
-        <Row label="Slash commands" value={String(status?.signals.commands.length ?? 0)} sub={null} />
-        <Row label="Skills" value={String(status?.signals.skills.length ?? 0)} sub={null} />
-        <Row label="MCP servers"
-          value={status?.signals.mcpServers.length ? status.signals.mcpServers.map((m) => `${m.name}:${m.status}`).join(", ") : "none"}
-          sub="A cloned repo's .mcp.json is never auto-connected (strictMcpConfig)." />
-        <Row label="CLI version" value={status?.signals.cliVersion ?? "—"} sub={null} />
+      <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginBottom: 9 }}>
+        <Eb>Claude Code · this session</Eb>
+        <span style={{ flex: 1 }} />
+        <button className="di-btn" onClick={copyAll}
+          style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 26, padding: "0 11px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "transparent", color: "var(--di-ink-soft)", fontFamily: "inherit", fontSize: 11, cursor: "pointer" }}>
+          <Icon name={copied ? "check" : "copy"} size={12} color={copied ? "var(--di-pos)" : "var(--di-ink-mute)"} />{copied ? "Copied" : "Copy all"}
+        </button>
       </div>
+
+      <div style={{ border: "1px solid #24384f", borderRadius: 11, background: "#0c1e30", overflow: "hidden", marginBottom: 16 }}>
+        <DiagRow tone={acct ? "ok" : "cold"} label="Connected as"
+          value={acct?.email ?? (acct?.apiProvider ? `${acct.apiProvider} credentials` : "—")}
+          detail={acct
+            ? [acct.organization, acct.subscriptionType].filter(Boolean).join(" · ") || null
+            : "Claude Code reports the account on its first turn."} />
+
+        <DiagRow tone={status?.costsAreReal ? "ok" : cold ? "cold" : "warn"} label="Cost figures"
+          value={cold ? "—" : status?.costsAreReal ? "Billed rates" : "Notional"}
+          detail={cold ? null : status?.costsAreReal
+            ? null
+            : "You are on a subscription, so the SDK reports what the tokens would cost at API rates. Nothing here is billed."} />
+
+        <DiagRow tone="warn" label="Settings loaded" value={(diag?.settingSources ?? []).join(" + ") || "—"}
+          detail={diag?.settingSourcesNote ?? null} />
+
+        <DiagRow tone={sig?.commands.length ? "ok" : "cold"} label="Inventory"
+          value={sig?.commands.length
+            ? `${sig.commands.length} commands · ${sig.skills.length} skills · ${sig.mcpServers.length} MCP servers`
+            : "—"}
+          detail={sig?.commands.length ? null : "Populated once Claude Code has started."} />
+
+        <DiagRow tone={sig?.cliVersion ? "ok" : "cold"} label="CLI version" value={sig?.cliVersion ?? "—"} detail={null} last />
+      </div>
+
+      {/* Disclosure, not a wall — but the count is on the face so a broken
+          session announces itself. */}
       {!!diag?.stderr.length && (
         <>
-          <Eb>Claude Code stderr · last {diag.stderr.length} lines</Eb>
-          <div className="di-mono" style={{ border: "1px solid #22384a", borderRadius: 10, background: "#0b1622", padding: "11px 13px", fontSize: 10.5, lineHeight: 1.7, color: "#8fa6b5", whiteSpace: "pre-wrap", maxHeight: 200, overflowY: "auto" }}>
-            {diag.stderr.join("\n")}
-          </div>
+          <button className="di-btn" onClick={() => setShowErr((v) => !v)} aria-expanded={showErr}
+            style={{ display: "flex", alignItems: "center", gap: 9, width: "100%", padding: "10px 13px", border: "1px solid #24384f", borderRadius: 10, background: "#0c1e30", cursor: "pointer", marginBottom: showErr ? 8 : 0 }}>
+            <Icon name={showErr ? "chevron-down" : "chevron-right"} size={13} color="var(--di-ink-mute)" />
+            <span style={{ flex: 1, textAlign: "left", fontSize: 12, color: "var(--di-ink-soft)" }}>CLI stderr</span>
+            <span className="di-mono" style={{ fontSize: 10.5, color: errCount ? "var(--di-neg)" : "#6f8296" }}>
+              {errCount ? `${errCount} error${errCount === 1 ? "" : "s"} · ` : ""}last {diag.stderr.length} lines
+            </span>
+          </button>
+          {showErr && (
+            <div className="di-mono di-scroll" style={{ border: "1px solid #22384a", borderRadius: 10, background: "#0b1622", padding: "11px 13px", fontSize: 10.5, lineHeight: 1.75, maxHeight: 220, overflowY: "auto" }}>
+              {diag.stderr.map((l, i) => (
+                <div key={i} style={{ color: /error|fail|exit [1-9]/i.test(l) ? "#e79b9b" : "#8fa6b5", whiteSpace: "pre-wrap" }}>{l}</div>
+              ))}
+            </div>
+          )}
         </>
       )}
     </>
   );
 }
 
-function Row({ label, value, sub }: { label: string; value: string; sub: string | null }) {
+/** One diagnostics row. Healthy stays one line; anything else earns a sentence
+ *  in place, so the shape of the answer is visible before the answer is. */
+function DiagRow({ tone, label, value, detail, last }: {
+  tone: "ok" | "warn" | "bad" | "cold"; label: string; value: string; detail: string | null; last?: boolean;
+}) {
+  const glyph = tone === "ok" ? "check-circle-2" : tone === "bad" ? "alert-octagon" : tone === "warn" ? "info" : "circle";
+  const colour = tone === "ok" ? "var(--di-pos)" : tone === "bad" ? "var(--di-neg)" : tone === "warn" ? "var(--di-warn)" : "#3e5670";
   return (
-    <div style={{ display: "flex", alignItems: "flex-start", gap: 11, padding: "11px 13px", borderBottom: "1px solid #14283c" }}>
-      <div style={{ flex: "0 0 150px", fontSize: 12, color: "var(--di-ink-soft)" }}>{label}</div>
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "11px 13px", borderBottom: last ? 0 : "1px solid #14283c" }}>
+      <Icon name={glyph} size={14} color={colour} style={{ flex: "0 0 auto", marginTop: 1 }} />
+      <div style={{ flex: "0 0 132px", fontSize: 12, color: "var(--di-ink-soft)" }}>{label}</div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="di-mono" style={{ fontSize: 11.5, color: "var(--di-ink)", wordBreak: "break-word" }}>{value}</div>
-        {sub && <div style={{ fontSize: 10.5, color: "#6f8296", lineHeight: 1.45, marginTop: 3 }}>{sub}</div>}
+        <div className="di-mono" style={{ fontSize: 11.5, color: value === "—" ? "#3e5670" : "var(--di-ink)", wordBreak: "break-word" }}>{value}</div>
+        {detail && <div style={{ fontSize: 10.5, color: "#6f8296", lineHeight: 1.5, marginTop: 4 }}>{detail}</div>}
       </div>
     </div>
   );

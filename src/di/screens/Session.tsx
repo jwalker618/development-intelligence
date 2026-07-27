@@ -83,7 +83,7 @@ export function SessionScreen({
 
         <EfficiencyPanel usage={usage} cavemanSavings={cavemanSavings} costsAreReal={status?.costsAreReal ?? false} />
 
-        <ContextMeter context={status?.context ?? null} limits={chat.limits} />
+        <ContextMeter context={status?.context ?? null} limits={chat.limits} cold={!status} />
 
         <HookLiveness hooks={chat.hooks} />
 
@@ -736,89 +736,176 @@ function EfficiencyPanel({ usage, cavemanSavings, costsAreReal }: { usage: Usage
 }
 
 
+/** Category swatch colours. The CLI names its own categories and they change
+ *  between versions, so the legend is coloured by POSITION, never by matching
+ *  a fixed set of strings we would have to keep in step. */
+const CAT_TINTS = ["#9ab1f2", "#7d6ef0", "#39d3ba", "#f8bd5e", "#f0926e", "#6eee7a"];
+
 /**
- * Live context-window accounting, straight from the CLI.
+ * The context window (46a).
+ *
+ * Percentage as the hero, absolute tokens as the meta line, a stacked bar and
+ * a legend built from whatever category strings the CLI happens to return.
  *
  * This is the honest replacement for a "% context saved" figure: there is no
  * counterfactual anywhere in the SDK for what a turn would have cost without
- * caveman, so we show what the window ACTUALLY holds and what is filling it.
+ * caveman, so we show what the window actually holds.
  */
-function ContextMeter({ context, limits }: { context: ChatStatus["context"]; limits: ChatState["limits"] }) {
-  if (!context && !limits) return null;
+function ContextMeter({ context, limits, cold }: {
+  context: ChatStatus["context"]; limits: ChatState["limits"]; cold: boolean;
+}) {
   const pct = context ? Math.min(100, Math.round(context.percentage)) : 0;
-  // Warn before auto-compact rather than after: compaction is where an agent
-  // quietly forgets the thing you told it forty turns ago.
-  const tone = pct >= 85 ? "var(--di-neg)" : pct >= 65 ? "var(--di-warn)" : "var(--di-info)";
-  const top = context
-    ? [...context.categories].filter((c) => c.tokens > 0).sort((a, b) => b.tokens - a.tokens).slice(0, 3)
-    : [];
+  const near = !!context && pct >= 85;
+  const cats = (context?.categories ?? []).filter((c) => c.tokens > 0).sort((a, b) => b.tokens - a.tokens);
+  const total = cats.reduce((a, c) => a + c.tokens, 0) || 1;
+
   return (
-    <div style={{ marginBottom: 12, border: "1px solid #23415f", borderRadius: 11, background: "#0f2842", padding: "9px 11px" }}>
-      <div className="di-eyebrow" style={{ marginBottom: 6, fontSize: 9, display: "flex", alignItems: "center", gap: 6 }}>
-        Context window
-        {context && <span className="di-mono" style={{ marginLeft: "auto", color: tone, fontWeight: 600 }}>{pct}%</span>}
-      </div>
-      {context ? (
-        <>
-          <div style={{ height: 5, borderRadius: 999, background: "#12283f", overflow: "hidden", marginBottom: 7 }}>
-            <div style={{ width: `${pct}%`, height: "100%", background: tone }} />
+    <>
+      {/* Above 85% the panel CHANGES REGISTER rather than growing a badge —
+          compaction is where an agent quietly forgets what you told it. */}
+      {near ? (
+        <div style={{ marginBottom: 12, border: "1px solid #5a3316", borderRadius: 11, background: "#160f0a", padding: "11px 12px" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 9 }}>
+            <span style={{ flex: "0 0 auto", width: 28, height: 28, borderRadius: 8, background: "#2a1a0c", border: "1px solid #5a3316", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Icon name="fold-vertical" size={14} color="var(--di-warn)" />
+            </span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "var(--di-ink)" }}>Auto-compact is close</div>
+              <div className="di-mono" style={{ fontSize: 10, color: "#a08a5e" }}>
+                {fmtTokens(context!.totalTokens)} / {fmtTokens(context!.maxTokens)} · {pct}%
+              </div>
+            </div>
           </div>
-          <div className="di-mono" style={{ fontSize: 9.5, color: "#6f8296", marginBottom: top.length ? 6 : 0 }}>
-            {fmtTokens(context.totalTokens)} of {fmtTokens(context.maxTokens)}
-            {pct >= 85 ? " · auto-compact is close" : ""}
+          <div style={{ height: 5, borderRadius: 999, background: "#2a1a0c", overflow: "hidden", marginBottom: 9 }}>
+            <div style={{ width: `${pct}%`, height: "100%", background: "var(--di-warn)" }} />
           </div>
-          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-            {top.map((c) => (
-              <span key={c.name} className="di-mono" style={{ fontSize: 9, color: "#93a4b5", border: "1px solid #24384f", borderRadius: 999, padding: "1px 7px" }}>
-                {c.name} {fmtTokens(c.tokens)}
-              </span>
-            ))}
+          <div style={{ fontSize: 11, color: "#c9b18a", lineHeight: 1.5 }}>
+            When the window fills, the conversation is summarised. The agent keeps the summary, not your words —
+            anything you told it early may not survive.
           </div>
-        </>
+        </div>
       ) : (
-        <div style={{ fontSize: 10.5, color: "#6f8296", lineHeight: 1.45 }}>Starts reporting once Claude Code is running.</div>
-      )}
-      {limits?.utilization != null && (
-        <div style={{ fontSize: 10, color: limits.status === "allowed" ? "#6f8296" : "var(--di-warn)", marginTop: 7, lineHeight: 1.45 }}>
-          Plan window: {Math.round(limits.utilization * 100)}% used
-          {limits.resetsAt ? ` · resets ${new Date(limits.resetsAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}
+        <div style={{ marginBottom: 12, border: "1px solid #23415f", borderRadius: 11, background: "#0f2842", padding: "10px 12px" }}>
+          <div className="di-eyebrow" style={{ fontSize: 9, marginBottom: 6, display: "flex", alignItems: "baseline" }}>
+            Context window
+            <span className="di-mono" style={{ marginLeft: "auto", fontSize: 9.5, letterSpacing: 0, textTransform: "none", color: "#6f8296" }}>
+              {context ? `${fmtTokens(context.totalTokens)} / ${fmtTokens(context.maxTokens)}` : "—"}
+            </span>
+          </div>
+
+          {/* Cold is not empty (49a): an em-dash where the figure goes, a
+              dashed empty track, and a sentence saying what will fill it.
+              Never a 0%, never a shimmer — a shimmer promises seconds. */}
+          <div style={{ display: "flex", alignItems: "baseline", gap: 7, marginBottom: 8 }}>
+            <span className="di-mono" style={{ fontSize: 26, fontWeight: 600, color: context ? "var(--di-ink)" : "#3e5670", letterSpacing: "-0.03em" }}>
+              {context ? `${pct}%` : "—"}
+            </span>
+            <span style={{ fontSize: 11.5, color: "#6f8296" }}>{context ? "full" : ""}</span>
+          </div>
+
+          {context ? (
+            <>
+              <div style={{ display: "flex", height: 6, borderRadius: 999, overflow: "hidden", background: "#12283f", marginBottom: 9 }}>
+                {cats.map((c, i) => (
+                  <span key={c.name} title={`${c.name} · ${fmtTokens(c.tokens)}`}
+                    style={{ width: `${(c.tokens / total) * pct}%`, background: CAT_TINTS[i % CAT_TINTS.length] }} />
+                ))}
+              </div>
+              {cats.slice(0, 4).map((c, i) => (
+                <div key={c.name} style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 3 }}>
+                  <span style={{ flex: "0 0 auto", width: 7, height: 7, borderRadius: 2, background: CAT_TINTS[i % CAT_TINTS.length] }} />
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--di-ink-soft)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</span>
+                  <span className="di-mono" style={{ flex: "0 0 auto", fontSize: 10, color: "#6f8296" }}>{fmtTokens(c.tokens)}</span>
+                </div>
+              ))}
+              <div style={{ fontSize: 10, color: "#6f8296", lineHeight: 1.45, marginTop: 7 }}>
+                Category names come from the CLI — they change between versions.
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ height: 6, borderRadius: 999, border: "1px dashed #24384f", marginBottom: 9 }} />
+              <div style={{ fontSize: 10.5, color: "#6f8296", lineHeight: 1.5 }}>
+                {cold ? "Claude Code reports the window on its first turn." : "Waiting for Claude Code to report the window."}
+              </div>
+            </>
+          )}
         </div>
       )}
-    </div>
+
+      {/* The plan window is about your ACCOUNT, not this session, so it gets
+          its own card — and only when the CLI reports one (46a). */}
+      {limits?.utilization != null && (
+        <div style={{ marginBottom: 12, border: "1px solid #2a3352", borderRadius: 11, background: "#111a33", padding: "10px 12px" }}>
+          <div className="di-eyebrow" style={{ fontSize: 9, marginBottom: 7, display: "flex", alignItems: "baseline" }}>
+            Plan window
+            {limits.resetsAt && (
+              <span style={{ marginLeft: "auto", fontSize: 9.5, letterSpacing: 0, textTransform: "none", color: "#6f8296" }}>
+                resets {new Date(limits.resetsAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 7 }}>
+            <div style={{ flex: 1, height: 4, borderRadius: 999, background: "#1c2540", overflow: "hidden" }}>
+              <div style={{ width: `${Math.round(limits.utilization * 100)}%`, height: "100%", background: limits.status === "allowed" ? "var(--di-aux)" : "var(--di-warn)" }} />
+            </div>
+            <span className="di-mono" style={{ flex: "0 0 auto", fontSize: 11, fontWeight: 600, color: limits.status === "allowed" ? "var(--di-aux)" : "var(--di-warn)" }}>
+              {Math.round(limits.utilization * 100)}%
+            </span>
+          </div>
+          <div style={{ fontSize: 10, color: "#6f8296", lineHeight: 1.45 }}>
+            Your account, not this session — so it sits on its own.
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
 /**
- * Did caveman and RTK actually fire?
+ * Did caveman and RTK actually fire? (46b)
  *
- * A boolean per hook run, honestly labelled — not a percentage. Nothing is
- * shown until a hook has actually run, so a session with no hooks configured
- * says nothing rather than implying failure.
+ * One ROW per hook, with the event and exit code on its face — three tiny
+ * chips carried too big a claim, and a phone cannot hover for the detail. A
+ * failure keeps its stderr line. Nothing renders until a hook has run, so an
+ * absent panel is never mistaken for a failing one.
  */
 function HookLiveness({ hooks }: { hooks: ChatState["hooks"] }) {
   if (!hooks.length) return null;
-  // Latest run wins per hook name — "did it work last time" is the question.
   const latest = new Map<string, ChatState["hooks"][number]>();
   for (const h of hooks) latest.set(h.name, h);
-  const rows = [...latest.values()].slice(-6);
+  const rows = [...latest.values()].sort((a, b) => b.at - a.at).slice(0, 6);
   return (
     <div style={{ marginBottom: 12 }}>
-      <div className="di-eyebrow" style={{ marginBottom: 6, fontSize: 9 }}>Hooks · last run</div>
-      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-        {rows.map((h) => {
-          const ok = h.outcome === "success";
-          return (
-            <span key={h.name} title={`${h.event} · exit ${h.exitCode ?? "?"}`} className="di-mono"
-              style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 9, color: ok ? "var(--di-pos)" : "var(--di-neg)",
-                border: `1px solid ${ok ? "#2a3f2e" : "#4a2b2b"}`, borderRadius: 999, padding: "2px 8px" }}>
-              <span style={{ width: 5, height: 5, borderRadius: 999, background: ok ? "var(--di-pos)" : "var(--di-neg)" }} />
-              {h.name}
+      <div className="di-eyebrow" style={{ marginBottom: 3, fontSize: 9 }}>Hooks · last run</div>
+      <div style={{ fontSize: 10, color: "#6f8296", marginBottom: 7 }}>Not a rate — the last time it ran.</div>
+      {rows.map((h) => {
+        const ok = h.outcome === "success";
+        return (
+          <div key={h.name} style={{ display: "flex", alignItems: "flex-start", gap: 9, padding: "7px 9px", borderRadius: 9, marginBottom: 4,
+            border: `1px solid ${ok ? "#1d3b2a" : "#4a2b2b"}`, background: ok ? "#0e1f18" : "#160e0e" }}>
+            <span style={{ flex: "0 0 auto", width: 6, height: 6, borderRadius: 999, marginTop: 5, background: ok ? "var(--di-pos)" : "var(--di-neg)" }} />
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span className="di-mono" style={{ display: "block", fontSize: 11, color: "var(--di-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{h.name}</span>
+              <span className="di-mono" style={{ display: "block", fontSize: 9.5, color: ok ? "#6f8296" : "#c9a0a0" }}>
+                {h.event || "hook"}{h.exitCode !== null ? ` · exit ${h.exitCode}` : ""}
+              </span>
             </span>
-          );
-        })}
-      </div>
+            <span className="di-mono" style={{ flex: "0 0 auto", fontSize: 9.5, color: "#3e5670" }}>{ago(h.at)}</span>
+          </div>
+        );
+      })}
     </div>
   );
+}
+
+/** "14s ago" — short, because these rows are narrow. */
+function ago(at: number): string {
+  const s = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.round(m / 60)}h ago`;
 }
 
 /**
