@@ -30,7 +30,7 @@ export interface Actions {
   markReviewed: (path: string) => void;
   setVerdict: (path: string, hunk: number, v: Verdict) => void;
   sendMessage: (text: string) => void;
-  resolveApproval: (id: string, decision: "allow" | "always" | "deny") => void;
+  resolveApproval: (id: string, decision: "allow" | "always" | "deny" | "stop", input?: Record<string, unknown>) => void;
   interrupt: () => void;
   setModel: (model: string) => void;
   setEffort: (effort: string | null) => void;
@@ -158,7 +158,7 @@ export function useControl(sessionId: string | null): Live {
     markReviewed: (path) => { reviewed.current.add(path); setState((p) => ({ ...p, changes: p.changes.map((c) => c.path === path ? { ...c, reviewed: true } : c) })); },
     setVerdict: (path, hunk, v) => setActiveDiff((d) => d && d.path === path ? { ...d, hunks: d.hunks.map((h, i) => i === hunk ? { ...h, verdict: h.verdict === v ? null : v } : h) } : d),
     sendMessage: (text) => { if (sessionId && text.trim()) void api.chatMessage(sessionId, text).catch(guard); },
-    resolveApproval: (id, decision) => { if (sessionId) void api.chatApproval(sessionId, id, decision).catch(guard); },
+    resolveApproval: (id, decision, input) => { if (sessionId) void api.chatApproval(sessionId, id, decision, input).catch(guard); },
     interrupt: () => { if (sessionId) void api.chatInterrupt(sessionId).catch(guard); },
     setModel: (model) => { if (sessionId) { setChat((c) => ({ ...c, model })); void api.chatModel(sessionId, model).catch(guard); } },
     setEffort: (effort) => { if (sessionId) { setChat((c) => ({ ...c, effort })); void api.chatEffort(sessionId, effort).catch(guard); } },
@@ -189,7 +189,15 @@ function foldOne(ev: { kind?: string; [k: string]: unknown }): ChatMsg[] {
   if (ev.kind === "user") return [{ id, role: "user", text: String(ev.text ?? "") }];
   if (ev.kind === "text") return [{ id, role: "agent", text: String(ev.text ?? "") }];
   if (ev.kind === "tool") return [{ id, role: "tool", text: String(ev.name ?? "tool"), file: ev.file as string | undefined }];
-  if (ev.kind === "approval") return [{ id, role: "approval", text: String(ev.title ?? "Approval required"), approvalId: String(ev.id ?? "") }];
+  if (ev.kind === "approval") return [{ id, role: "approval", text: String(ev.title ?? "Approval required"), approvalId: String(ev.id ?? ""), approval: {
+      toolName: String(ev.toolName ?? "tool"),
+      description: (ev.description as string) ?? null,
+      blockedPath: (ev.blockedPath as string) ?? null,
+      decisionReason: (ev.decisionReason as string) ?? null,
+      agentID: (ev.agentID as string) ?? null,
+      canAlways: !!ev.canAlways,
+      input: (ev.input as Record<string, unknown>) ?? {},
+    } }];
   return [];
 }
 

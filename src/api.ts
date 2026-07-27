@@ -327,10 +327,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ text }),
     }),
-  chatApproval: (id: string, approvalId: string, decision: "allow" | "always" | "deny") =>
+  chatApproval: (
+    id: string,
+    approvalId: string,
+    decision: "allow" | "always" | "deny" | "stop",
+    input?: Record<string, unknown>,
+  ) =>
     req(`/api/sessions/${id}/chat/approval`, {
       method: "POST",
-      body: JSON.stringify({ id: approvalId, decision }),
+      body: JSON.stringify(input ? { id: approvalId, decision, input } : { id: approvalId, decision }),
     }),
   chatInterrupt: (id: string) =>
     req(`/api/sessions/${id}/chat/interrupt`, { method: "POST" }),

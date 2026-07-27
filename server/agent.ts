@@ -33,6 +33,9 @@ export type ChatEventKind =
   | "result" // turn finished {ok, costUsd, durationMs}
   | "error"; // {message}
 
+/** 'stop' denies AND interrupts the turn; 'allow' may carry an edited input. */
+export type ApprovalDecision = "allow" | "always" | "deny" | "stop";
+
 export interface ChatEvent {
   seq: number;
   at: number;
@@ -264,17 +267,29 @@ export class AgentChat {
     this.setBusy(false);
   }
 
-  resolveApproval(id: string, decision: "allow" | "always" | "deny"): boolean {
+  resolveApproval(
+    id: string,
+    decision: ApprovalDecision,
+    editedInput?: Record<string, unknown>,
+  ): boolean {
     const p = this.pending;
     if (!p || p.id !== id) return false;
     this.pending = null;
-    this.emit("approval_done", { id, decision });
-    if (decision === "deny") {
-      p.resolve({ behavior: "deny", message: "Denied from Grotto." });
+    const edited = decision === "allow" && editedInput ? editedInput : undefined;
+    this.emit("approval_done", { id, decision, edited: !!edited });
+    if (decision === "deny" || decision === "stop") {
+      p.resolve({
+        behavior: "deny",
+        message: decision === "stop" ? "Denied — stop this turn." : "Denied from Grotto.",
+        // 'stop' ends the whole turn instead of letting the agent try again.
+        ...(decision === "stop" ? { interrupt: true } : {}),
+      });
     } else {
       p.resolve({
         behavior: "allow",
-        updatedInput: p.input,
+        // updatedInput is how a reviewer FIXES a bad argument (e.g. a wrong rm
+        // path) instead of denying and re-prompting in prose.
+        updatedInput: edited ?? p.input,
         ...(decision === "always" && p.suggestions?.length
           ? { updatedPermissions: p.suggestions }
           : {}),
@@ -337,11 +352,20 @@ export class AgentChat {
               suggestions: opts.suggestions,
             };
           });
+          // Surface the FULL context the SDK gives us. Previously we kept only
+          // title/displayName, so the reviewer had to infer blast radius from a
+          // raw input blob.
           this.emit("approval", {
             id: opts.requestId,
             toolName,
             title: opts.title ?? `Claude wants to use ${toolName}`,
             displayName: opts.displayName ?? toolName,
+            description: opts.description ?? null,   // blast radius, in prose
+            blockedPath: opts.blockedPath ?? null,   // the path that tripped it
+            decisionReason: opts.decisionReason ?? null, // WHY it was asked
+            agentID: opts.agentID ?? null,           // non-null => a subagent
+            toolUseId: opts.toolUseID ?? null,
+            canAlways: !!opts.suggestions?.length,
             input,
           });
           opts.signal.addEventListener("abort", () => {

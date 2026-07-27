@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon, RailTitle } from "../primitives";
 import { RailScroll, RailDock, MainColumn } from "../Shell";
-import type { ChatState } from "../control";
+import type { ChatMsg, ChatState } from "../control";
 import type { SAMPLE } from "../control";
 import type { ModelRow, SearchHit, UsageSummary } from "../../api";
 import type { CavemanMode, SessionState } from "../state";
@@ -40,7 +40,7 @@ export function SessionScreen({
   onConnect: () => void;
   onCaveman: (m: CavemanMode) => void;
   onSend: (text: string) => void;
-  onApproval: (id: string, d: "allow" | "always" | "deny") => void;
+  onApproval: (id: string, d: "allow" | "always" | "deny" | "stop", input?: Record<string, unknown>) => void;
   onInterrupt: () => void;
   models: ModelRow[] | null;
   usage: UsageSummary | null;
@@ -223,7 +223,7 @@ function NotConnected({ onConnect }: { onConnect: () => void }) {
 
 const SUGGESTIONS = ["Explain this repo", "Add a failing test", "Fix the pending filter"];
 
-function ChatBody({ chat, onApproval, onSend }: { chat: ChatState; onApproval: (id: string, d: "allow" | "always" | "deny") => void; onSend: (t: string) => void }) {
+function ChatBody({ chat, onApproval, onSend }: { chat: ChatState; onApproval: (id: string, d: "allow" | "always" | "deny" | "stop", input?: Record<string, unknown>) => void; onSend: (t: string) => void }) {
   if (chat.messages.length === 0) {
     return (
       <>
@@ -260,25 +260,9 @@ function ChatBody({ chat, onApproval, onSend }: { chat: ChatState; onApproval: (
             </div>
           </div>
         );
-        // approval — the native Allow/Always/Deny card
+        // approval — a review instrument, not a yes/no prompt
         const pending = chat.pendingApprovalId === m.approvalId;
-        return (
-          <div key={m.id} style={{ alignSelf: "flex-start", border: "1px solid #3a2f18", borderRadius: 9, background: "#181206", padding: "10px 12px", maxWidth: "86%" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: pending ? 9 : 0 }}>
-              <Icon name="terminal" size={13} color="#c99a4a" />
-              <span style={{ fontSize: 11.5, color: "#d9c9a6" }}>{m.text}</span>
-            </div>
-            {pending && (
-              <div style={{ display: "flex", gap: 7 }}>
-                {(["allow", "always", "deny"] as const).map((d) => (
-                  <button key={d} className="di-btn" onClick={() => onApproval(m.approvalId!, d)}
-                    style={{ height: 28, padding: "0 12px", borderRadius: 7, border: d === "deny" ? "1px solid #4a2020" : 0, cursor: "pointer",
-                      background: d === "deny" ? "transparent" : d === "always" ? "#1f8a5b" : "#2a6a44", color: d === "deny" ? "var(--di-neg)" : "#eafff1", fontSize: 11, fontWeight: 600, fontFamily: "inherit", textTransform: "capitalize" }}>{d}</button>
-                ))}
-              </div>
-            )}
-          </div>
-        );
+        return <ApprovalCard key={m.id} m={m} pending={pending} onApproval={onApproval} />;
       })}
     </div>
   );
@@ -478,6 +462,109 @@ function EfficiencyPanel({ usage, cavemanSavings }: { usage: UsageSummary | null
         )}
       </div>
     </div>
+  );
+}
+
+
+/** The approval card. Uses everything the SDK gives us about a tool request:
+ *  blast radius (description), the path that tripped it, why it was asked, and
+ *  a subagent badge — plus two affordances a reviewer actually needs: EDIT the
+ *  arguments (so a wrong `rm` path is fixed, not denied-and-re-prompted) and
+ *  DENY & STOP (end the turn rather than let the agent try another way). */
+function ApprovalCard({
+  m, pending, onApproval,
+}: {
+  m: ChatMsg;
+  pending: boolean;
+  onApproval: (id: string, d: "allow" | "always" | "deny" | "stop", input?: Record<string, unknown>) => void;
+}) {
+  const a = m.approval;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+
+  const startEdit = () => {
+    setDraft(JSON.stringify(a?.input ?? {}, null, 2));
+    setErr(null);
+    setEditing(true);
+  };
+  const allowEdited = () => {
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(draft) as Record<string, unknown>; }
+    catch (e) { setErr(e instanceof Error ? e.message : "invalid JSON"); return; }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) { setErr("must be a JSON object"); return; }
+    onApproval(m.approvalId!, "allow", parsed);
+    setEditing(false);
+  };
+
+  return (
+    <div style={{ alignSelf: "flex-start", border: "1px solid #3a2f18", borderRadius: 9, background: "#181206", padding: "10px 12px", maxWidth: "92%", minWidth: 280 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <Icon name="terminal" size={13} color="#c99a4a" />
+        <span style={{ fontSize: 11.5, color: "#d9c9a6", flex: 1 }}>{m.text}</span>
+        {a?.agentID && (
+          <span style={{ fontSize: 8.5, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--di-info)", border: "1px solid #2c5075", borderRadius: 999, padding: "1px 6px" }}>subagent</span>
+        )}
+      </div>
+      {/* Blast radius — the single most useful thing for a reviewer. */}
+      {a?.description && (
+        <div style={{ fontSize: 10.5, color: "#c9b184", lineHeight: 1.5, marginBottom: 5 }}>{a.description}</div>
+      )}
+      {a?.blockedPath && (
+        <div className="di-mono" style={{ fontSize: 10, color: "var(--di-neg)", marginBottom: 4, wordBreak: "break-all" }}>
+          ⚠ {a.blockedPath}
+        </div>
+      )}
+      {a?.decisionReason && (
+        <div style={{ fontSize: 10, color: "#a08a5e", marginBottom: 6, lineHeight: 1.45 }}>{a.decisionReason}</div>
+      )}
+      {pending && a && !editing && Object.keys(a.input).length > 0 && (
+        <pre className="di-mono" style={{ margin: "0 0 8px", padding: "7px 9px", background: "#0d0904", border: "1px solid #3a2f18", borderRadius: 7, fontSize: 10, color: "#b9a882", maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          {JSON.stringify(a.input, null, 2).slice(0, 1200)}
+        </pre>
+      )}
+      {pending && editing && (
+        <>
+          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} className="di-mono"
+            style={{ width: "100%", minHeight: 110, padding: "7px 9px", background: "#0d0904", border: "1px solid #6a4a1a", borderRadius: 7, color: "#e9dcc8", fontSize: 10.5, outline: "none", resize: "vertical", boxSizing: "border-box", marginBottom: 6 }} />
+          {err && <div style={{ fontSize: 10.5, color: "var(--di-neg)", marginBottom: 6 }}>{err}</div>}
+        </>
+      )}
+      {pending && (
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+          {editing ? (
+            <>
+              <ApprovalBtn label="Run edited" tone="allow" onClick={allowEdited} />
+              <ApprovalBtn label="Cancel" tone="ghost" onClick={() => setEditing(false)} />
+            </>
+          ) : (
+            <>
+              <ApprovalBtn label="Allow" tone="allow" onClick={() => onApproval(m.approvalId!, "allow")} />
+              {a?.canAlways && <ApprovalBtn label="Always" tone="always" onClick={() => onApproval(m.approvalId!, "always")} />}
+              {a && Object.keys(a.input).length > 0 && <ApprovalBtn label="Edit" tone="ghost" onClick={startEdit} />}
+              <ApprovalBtn label="Deny" tone="deny" onClick={() => onApproval(m.approvalId!, "deny")} />
+              <ApprovalBtn label="Deny & stop" tone="stop" onClick={() => onApproval(m.approvalId!, "stop")} />
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ApprovalBtn({ label, tone, onClick }: { label: string; tone: "allow" | "always" | "deny" | "stop" | "ghost"; onClick: () => void }) {
+  const styles: Record<string, React.CSSProperties> = {
+    allow: { background: "#2a6a44", color: "#eafff1", border: 0 },
+    always: { background: "#1f8a5b", color: "#eafff1", border: 0 },
+    deny: { background: "transparent", color: "var(--di-neg)", border: "1px solid #4a2020" },
+    stop: { background: "#4a2020", color: "#ffb3a6", border: "1px solid #6a2a2a" },
+    ghost: { background: "transparent", color: "var(--di-ink-mute)", border: "1px solid var(--di-rule)" },
+  };
+  return (
+    <button className="di-btn" onClick={onClick}
+      style={{ height: 28, padding: "0 12px", borderRadius: 7, cursor: "pointer", fontSize: 11, fontWeight: 600, fontFamily: "inherit", ...styles[tone] }}>
+      {label}
+    </button>
   );
 }
 

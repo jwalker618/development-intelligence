@@ -194,6 +194,16 @@ export interface ChatMsg {
   file?: string;
   addDel?: string;
   approvalId?: string;
+  /** Approval context from the SDK — blast radius and why it was asked. */
+  approval?: {
+    toolName: string;
+    description: string | null;
+    blockedPath: string | null;
+    decisionReason: string | null;
+    agentID: string | null;
+    canAlways: boolean;
+    input: Record<string, unknown>;
+  };
   /** Built from streaming deltas; the durable `text` event replaces it rather
    *  than appending a second identical bubble. */
   streaming?: boolean;
@@ -221,7 +231,15 @@ function foldEvent(msgs: ChatMsg[], ev: ChatEvent): ChatMsg[] {
     case "tool":
       return [...msgs, { id, role: "tool", text: String(ev.name ?? "tool"), file: ev.file as string | undefined }];
     case "approval":
-      return [...msgs, { id, role: "approval", text: String(ev.title ?? "Approval required"), approvalId: String(ev.id ?? "") }];
+      return [...msgs, { id, role: "approval", text: String(ev.title ?? "Approval required"), approvalId: String(ev.id ?? ""), approval: {
+      toolName: String(ev.toolName ?? "tool"),
+      description: (ev.description as string) ?? null,
+      blockedPath: (ev.blockedPath as string) ?? null,
+      decisionReason: (ev.decisionReason as string) ?? null,
+      agentID: (ev.agentID as string) ?? null,
+      canAlways: !!ev.canAlways,
+      input: (ev.input as Record<string, unknown>) ?? {},
+    } }];
     default:
       return msgs;
   }

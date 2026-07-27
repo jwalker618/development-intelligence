@@ -4,7 +4,7 @@ import http from "node:http";
 import path from "node:path";
 import { WebSocketServer } from "ws";
 import { LoginThrottle, Logins, Mfa, safeEq } from "./auth.js";
-import { AgentChats, type AgentChat } from "./agent.js";
+import { AgentChats, type AgentChat, type ApprovalDecision } from "./agent.js";
 import { cavemanStatus, setCavemanMode } from "./caveman.js";
 import { ClaudeAuth } from "./claude-auth.js";
 import { doctor, repair } from "./doctor.js";
@@ -272,12 +272,21 @@ router.on("POST", "/api/sessions/:id/chat/message", ({ params, body }) => {
 });
 
 router.on("POST", "/api/sessions/:id/chat/approval", ({ params, body }) => {
-  const b = (body ?? {}) as { id?: string; decision?: string };
-  if (!b.id || !["allow", "always", "deny"].includes(b.decision ?? "")) {
-    throw new HttpError(400, "id and decision (allow|always|deny) required");
+  const b = (body ?? {}) as { id?: string; decision?: string; input?: unknown };
+  if (!b.id || !["allow", "always", "deny", "stop"].includes(b.decision ?? "")) {
+    throw new HttpError(400, "id and decision (allow|always|deny|stop) required");
+  }
+  // An edited input must be a plain object — it is handed straight to the tool.
+  let edited: Record<string, unknown> | undefined;
+  if (b.input !== undefined) {
+    if (typeof b.input !== "object" || b.input === null || Array.isArray(b.input)) {
+      throw new HttpError(400, "input must be an object");
+    }
+    if (JSON.stringify(b.input).length > 100_000) throw new HttpError(400, "input too large");
+    edited = b.input as Record<string, unknown>;
   }
   const s = manager.get(params.id);
-  const ok = chats.get(s.id, s.dir).resolveApproval(b.id, b.decision as "allow" | "always" | "deny");
+  const ok = chats.get(s.id, s.dir).resolveApproval(b.id, b.decision as ApprovalDecision, edited);
   if (!ok) throw new HttpError(409, "that request is no longer pending");
   return { ok: true };
 });
