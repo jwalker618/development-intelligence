@@ -4,7 +4,7 @@ import http from "node:http";
 import path from "node:path";
 import { WebSocketServer } from "ws";
 import { LoginThrottle, Logins, Mfa, safeEq } from "./auth.js";
-import { AgentChats, type AgentChat, type ApprovalDecision } from "./agent.js";
+import { AgentChats, PERMISSION_MODES, type AgentChat, type ApprovalDecision, type DiPermissionMode } from "./agent.js";
 import { cavemanStatus, setCavemanMode } from "./caveman.js";
 import { ClaudeAuth } from "./claude-auth.js";
 import { doctor, repair } from "./doctor.js";
@@ -359,6 +359,87 @@ router.on("POST", "/api/sessions/:id/chat/effort", async ({ params, body }) => {
   const s = manager.get(params.id);
   await chats.get(s).setEffort(e as (typeof EFFORTS)[number] | null);
   return { ok: true };
+});
+
+// ── the leash: how much the agent may do without asking ─────────────────────
+
+/** Change the permission mode mid-session. The SDK has a live setter, so this
+ *  takes effect on the very next tool call — no query recycle. */
+router.on("POST", "/api/sessions/:id/chat/permission-mode", async ({ params, body }) => {
+  const b = (body ?? {}) as { mode?: string };
+  const mode = b.mode as DiPermissionMode;
+  if (!PERMISSION_MODES.includes(mode)) {
+    throw new HttpError(400, `mode must be one of ${PERMISSION_MODES.join(", ")}`);
+  }
+  const s = manager.get(params.id);
+  await chats.get(s).setPermissionMode(mode);
+  return { ok: true, mode };
+});
+
+/** Structural read-only review: the mutating tools are removed, not forbidden. */
+router.on("POST", "/api/sessions/:id/chat/read-only", async ({ params, body }) => {
+  const b = (body ?? {}) as { readOnly?: boolean };
+  if (typeof b.readOnly !== "boolean") throw new HttpError(400, "readOnly must be a boolean");
+  const s = manager.get(params.id);
+  await chats.get(s).setReadOnly(b.readOnly);
+  return { ok: true, readOnly: b.readOnly };
+});
+
+/** Hard spend ceiling. Null clears it. */
+router.on("POST", "/api/sessions/:id/chat/budget", async ({ params, body }) => {
+  const b = (body ?? {}) as { budgetUsd?: number | null };
+  const usd = b.budgetUsd;
+  if (usd !== null && usd !== undefined && (typeof usd !== "number" || !Number.isFinite(usd) || usd <= 0 || usd > 1000)) {
+    throw new HttpError(400, "budgetUsd must be a positive number up to 1000, or null");
+  }
+  const s = manager.get(params.id);
+  await chats.get(s).setBudget(usd ?? null);
+  return { ok: true, budgetUsd: usd ?? null };
+});
+
+// ── what the CLI is telling us about itself ─────────────────────────────────
+
+/**
+ * Everything the session knows about its own environment: CLI inventories,
+ * hook liveness (did caveman/RTK actually fire), the leash, the context meter,
+ * the account, and the plan rate-limit window. `warm=1` starts the CLI first —
+ * without a running query most of this has no data source at all.
+ */
+router.on("GET", "/api/sessions/:id/chat/status", async ({ params, query }) => {
+  const s = manager.get(params.id);
+  const chat = chats.get(s);
+  if (query.get("warm") === "1") {
+    chat.warm();
+    // `system/init` only lands after the first user message, so on a warmed but
+    // unused session the inventories have to be pulled explicitly.
+    await chat.hydrateSignals();
+  }
+  const [context, account] = await Promise.all([chat.contextUsage(), chat.account()]);
+  return {
+    ...chat.status(),
+    permissionMode: chat.permissionMode,
+    readOnly: chat.readOnly,
+    budgetUsd: chat.budgetUsd,
+    costsAreReal: chat.costsAreReal(),
+    context,
+    account,
+    limits: chat.limits(),
+  };
+});
+
+/** CLI-process detail for Settings → Diagnostics. Never indexed by ⌘K. */
+router.on("GET", "/api/sessions/:id/chat/diag", ({ params }) => {
+  const s = manager.get(params.id);
+  const chat = chats.get(s);
+  return {
+    stderr: chat.stderrTail(),
+    signals: chat.status().signals,
+    hooks: chat.status().hooks,
+    // The deliberate settingSources omission, stated rather than mysterious.
+    settingSources: ["user", "project"],
+    settingSourcesNote:
+      "`local` is not loaded: it would execute a freshly cloned repo's hooks and permissions.",
+  };
 });
 
 /** Max checkouts per session. Each is a full clone on the volume and another
