@@ -95,7 +95,7 @@ export function useControl(sessionId: string | null): Live {
       await loadSession(sessionId);
       stop = subscribeChat(sessionId, {
         onState: (patch) => setChat((c) => ({ ...c, ...patch })),
-        onEvent: (ev) => setChat((c) => ({ ...c, messages: [...c.messages, ...foldOne(ev)] })),
+        onEvent: (ev) => setChat((c) => reconcile(c, ev)),
         onDelta: (text) => setChat((c) => appendDelta(c, text)),
         onConn: (cc) => setConn(cc),
       });
@@ -191,6 +191,22 @@ function foldOne(ev: { kind?: string; [k: string]: unknown }): ChatMsg[] {
 
 function appendDelta(c: ChatState, text: string): ChatState {
   const last = c.messages[c.messages.length - 1];
-  if (last && last.role === "agent") return { ...c, messages: c.messages.slice(0, -1).concat({ ...last, text: last.text + text }) };
-  return { ...c, messages: [...c.messages, { id: `d${c.messages.length}`, role: "agent", text }] };
+  if (last && last.role === "agent" && last.streaming) {
+    return { ...c, messages: c.messages.slice(0, -1).concat({ ...last, text: last.text + text }) };
+  }
+  return { ...c, messages: [...c.messages, { id: `d${c.messages.length}`, role: "agent", text, streaming: true }] };
+}
+
+/** Fold a durable event, reconciling with any bubble already built from deltas.
+ *  Without this every streamed reply renders twice: once from the deltas, then
+ *  again when the authoritative `text` event lands. */
+function reconcile(c: ChatState, ev: { kind?: string; [k: string]: unknown }): ChatState {
+  const next = foldOne(ev);
+  if (!next.length) return c;
+  const last = c.messages[c.messages.length - 1];
+  if (ev.kind === "text" && last && last.role === "agent" && last.streaming) {
+    // Same content, authoritative copy — replace, don't duplicate.
+    return { ...c, messages: c.messages.slice(0, -1).concat({ ...next[0], streaming: false }) };
+  }
+  return { ...c, messages: [...c.messages, ...next] };
 }

@@ -194,6 +194,9 @@ export interface ChatMsg {
   file?: string;
   addDel?: string;
   approvalId?: string;
+  /** Built from streaming deltas; the durable `text` event replaces it rather
+   *  than appending a second identical bubble. */
+  streaming?: boolean;
 }
 
 export interface ChatState {

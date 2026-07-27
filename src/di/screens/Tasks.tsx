@@ -6,8 +6,10 @@ import type { SAMPLE } from "../control";
 import type { SessionState, TaskManifest, TaskParam } from "../state";
 
 export function TasksScreen({ s, sample }: { s: SessionState; sample: typeof SAMPLE }) {
-  const [selectedId, setSelectedId] = useState(s.tasks[0].id);
-  const task = s.tasks.find((t) => t.id === selectedId)!;
+  // s.tasks is empty the moment this is driven by a live list — indexing [0]
+  // and the non-null find() both crashed the screen.
+  const [selectedId, setSelectedId] = useState<string | null>(s.tasks[0]?.id ?? null);
+  const task = s.tasks.find((t) => t.id === selectedId) ?? s.tasks[0] ?? null;
   const groups = useMemo(() => {
     const g: Record<string, TaskManifest[]> = {};
     for (const t of s.tasks) (g[t.group] ??= []).push(t);

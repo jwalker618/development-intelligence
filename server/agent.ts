@@ -239,7 +239,11 @@ export class AgentChat {
     if (this.q && !this.busy) {
       const q = this.q;
       this.q = null;
+      // interrupt() ends the TURN; close() ends the PROCESS. Without the close
+      // every effort change leaked a Claude CLI subprocess for the container's
+      // lifetime.
       await q.interrupt().catch(() => undefined);
+      try { await q.close?.(); } catch { /* already gone */ }
     }
     this.broadcast({ t: "effort", effort });
   }
