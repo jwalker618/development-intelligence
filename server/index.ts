@@ -326,6 +326,12 @@ router.on("POST", "/api/sessions/:id/chat/model", async ({ params, body }) => {
 });
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+/** Real per-turn usage ledger — the honest basis for the efficiency tiles. */
+router.on("GET", "/api/sessions/:id/usage", ({ params }) => {
+  const s = manager.get(params.id);
+  return chats.get(s.id, s.dir).usage();
+});
+
 router.on("POST", "/api/sessions/:id/chat/effort", async ({ params, body }) => {
   const b = (body ?? {}) as { effort?: string | null };
   const e = b.effort?.trim() || null;

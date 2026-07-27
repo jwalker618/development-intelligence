@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type ModelRow, type SearchHit, type SessionInfo } from "../api";
+import { api, type ModelRow, type SearchHit, type SessionInfo, type UsageSummary } from "../api";
 import {
   SAMPLE, buildTree, mapSpanDiff, parseDiff, setCavemanMode, subscribeChat, toChanges, toDialMode, toTimeline,
   type ChatMsg, type ChatState, type Move, type TreeNode,
@@ -13,6 +13,7 @@ export interface Live {
   sessions: SessionInfo[];
   chat: ChatState;
   models: ModelRow[] | null;
+  usage: UsageSummary | null;
   tree: TreeNode | null;
   activeDiff: { path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null;
   cavemanSavings: string | null;
@@ -52,6 +53,7 @@ export function useControl(sessionId: string | null): Live {
   const [activeDiff, setActiveDiff] = useState<{ path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null>(null);
   const [cavemanSavings, setCavemanSavings] = useState<string | null>(null);
   const [models, setModels] = useState<ModelRow[] | null>(null);
+  const [usage, setUsage] = useState<UsageSummary | null>(null);
   const modelsFor = useRef<string | null>(null);
   const [conn, setConn] = useState<Conn>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -64,10 +66,11 @@ export function useControl(sessionId: string | null): Live {
 
   const loadSession = useCallback(async (id: string) => {
     try {
-      const [cav, git, log, treeRes, list, pinsRes] = await Promise.all([
-        api.caveman(), api.gitStatus(id), api.gitLog(id), api.tree(id), api.sessions(), api.pins(id),
+      const [cav, git, log, treeRes, list, pinsRes, usageRes] = await Promise.all([
+        api.caveman(), api.gitStatus(id), api.gitLog(id), api.tree(id), api.sessions(), api.pins(id), api.usage(id).catch(() => null),
       ]);
       setSessions(list);
+      if (usageRes) setUsage(usageRes);
       const info = list.find((s) => s.id === id);
       setCavemanSavings(cav.savings);
       setTree(buildTree(treeRes.files, info?.repo ?? "repo"));
@@ -97,6 +100,7 @@ export function useControl(sessionId: string | null): Live {
         onState: (patch) => setChat((c) => ({ ...c, ...patch })),
         onEvent: (ev) => setChat((c) => reconcile(c, ev)),
         onDelta: (text) => setChat((c) => appendDelta(c, text)),
+        onUsage: (u) => setUsage(u),
         onConn: (cc) => setConn(cc),
       });
     })();
@@ -177,7 +181,7 @@ export function useControl(sessionId: string | null): Live {
     refresh: () => { if (sessionId) void loadSession(sessionId); },
   };
 
-  return { state, sessions, chat, models, tree, activeDiff, cavemanSavings, sample: SAMPLE, conn, error, actions };
+  return { state, sessions, chat, models, usage, tree, activeDiff, cavemanSavings, sample: SAMPLE, conn, error, actions };
 }
 
 function foldOne(ev: { kind?: string; [k: string]: unknown }): ChatMsg[] {

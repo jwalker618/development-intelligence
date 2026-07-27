@@ -7,7 +7,7 @@
  * runtime bridge — is flagged in `SAMPLE` and stays on seed data (honest until
  * those endpoints exist; see the design handoff §9 open questions). */
 
-import { api, chatUrl, getToken, type CavemanStatus, type GitStatus, type SpanDiffResponse } from "../api";
+import { api, chatUrl, getToken, type CavemanStatus, type GitStatus, type SpanDiffResponse, type UsageSummary } from "../api";
 import type {
   CavemanMode, Change, DiffLine, Hunk, Pin, SessionState, TimelineTick,
 } from "./state";
@@ -15,8 +15,8 @@ import { seedState } from "./state";
 
 // ── which surfaces are live vs. sample (drives the "sample" chips in the UI) ──
 export const SAMPLE = {
-  rtk: true,            // no RTK endpoint yet
-  cavemanPercent: true, // server gives a lifetime savings string, not a per-session %
+  rtk: false,           // live: real per-turn token/cache ledger (server/usage.ts)
+  cavemanPercent: false,// live: measured per-mode token averages from real turns
   semanticDiff: false,  // live: token-level span diff + LCS move detection (server/spandiff.ts)
   pins: false,          // live: per-session pin store (server/pins.ts)
   tasks: true,          // no task-runner backend yet (§9.3)
@@ -237,6 +237,7 @@ export function subscribeChat(
   sessionId: string,
   handlers: {
     onState: (patch: Partial<ChatState>) => void;
+    onUsage?: (u: UsageSummary) => void;
     onEvent: (ev: ChatEvent) => void;
     onDelta: (text: string) => void;
     onConn: (c: "connecting" | "live" | "offline") => void;
@@ -271,6 +272,8 @@ export function subscribeChat(
         handlers.onState({ busy: !!f.busy });
       } else if (f.t === "model") {
         handlers.onState({ model: (f.model as string) ?? null });
+      } else if (f.t === "usage") {
+        handlers.onUsage?.(f.summary as UsageSummary);
       } else if (f.t === "effort") {
         handlers.onState({ effort: (f.effort as string) ?? null });
       } else if (f.t === "approval_cleared") {

@@ -42,6 +42,22 @@ export interface GitLogEntry {
   when: string;
 }
 
+/** Real per-turn usage ledger (server/usage.ts) — the basis for the RTK and
+ *  caveman efficiency tiles. No fabricated numbers. */
+export interface ModeStat { mode: string; turns: number; avgOutputTokens: number; avgTotalTokens: number; avgCostUsd: number }
+export interface UsageSummary {
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreateTokens: number;
+  costUsd: number;
+  cacheHitPct: number | null;
+  byMode: ModeStat[];
+  cavemanDelta: { best: string; worst: string; outputTokenReductionPct: number } | null;
+  recent: Array<{ at: number; mode: string; model: string | null; inputTokens: number; outputTokens: number; cacheReadTokens: number; costUsd: number; durationMs: number }>;
+}
+
 /** One row of the live model catalog (server/models.ts). */
 export interface ModelRow {
   value: string;
@@ -295,6 +311,7 @@ export const api = {
     req<{ hits: SearchHit[] }>(
       `/api/sessions/${id}/transcript/search?q=${encodeURIComponent(q)}`,
     ),
+  usage: (id: string) => req<UsageSummary>(`/api/sessions/${id}/usage`),
   pins: (id: string) => req<{ pins: PinRecord[] }>(`/api/sessions/${id}/pins`),
   addPin: (id: string, icon: string, label: string) =>
     req<{ pin: PinRecord }>(`/api/sessions/${id}/pins`, {

@@ -10,7 +10,9 @@ import {
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { WebSocket } from "ws";
+import { cavemanStatus } from "./caveman.js";
 import { sessionEnv, type GrottoConfig } from "./config.js";
+import { UsageLedger, turnFromResult } from "./usage.js";
 
 // ── Native agent chat ───────────────────────────────────────────────────────
 // The phone never sees Claude Code's full-screen TUI again: the server drives
@@ -87,11 +89,14 @@ export class AgentChat {
    *  "Default" session would silently stick to whatever was newest that day. */
   private active: string | null = null;
 
+  private ledger: UsageLedger;
+
   constructor(
     private cfg: GrottoConfig,
     readonly sessionId: string,
     private dir: string,
   ) {
+    this.ledger = new UsageLedger(cfg);
     fs.mkdirSync(this.chatDir, { recursive: true });
     this.load();
   }
@@ -219,6 +224,10 @@ export class AgentChat {
     else this.inputBacklog.push(msg);
   }
 
+  usage(): ReturnType<UsageLedger["summarize"]> {
+    return this.ledger.summarize(this.sessionId);
+  }
+
   get effort(): EffortLevel | null {
     return this.meta.effort ?? null;
   }
@@ -312,6 +321,9 @@ export class AgentChat {
         // Load the user's CLAUDE_CONFIG_DIR settings + the repo's CLAUDE.md —
         // this is what keeps caveman hooks and RTK in the loop headlessly.
         settingSources: ["user", "project"],
+        // Hook events let us show whether caveman / RTK actually fired for a
+        // turn — a real liveness signal instead of assuming they are working.
+        includeHookEvents: true,
         includePartialMessages: true,
         permissionMode: "default",
         canUseTool: async (toolName, input, opts) => {
@@ -398,14 +410,29 @@ export class AgentChat {
               }
               break;
             }
-            case "result":
+            case "result": {
+              // Real per-turn usage, tagged with the caveman mode that was
+              // active — this is what replaces the invented efficiency numbers.
+              const mode = cavemanStatus(this.cfg.claudeConfigDir).mode ?? "off";
+              const turn = turnFromResult(
+                msg as unknown as Record<string, unknown>,
+                mode,
+                this.active ?? this.meta.model ?? null,
+              );
+              this.ledger.record(this.sessionId, turn);
               this.emit("result", {
                 ok: msg.subtype === "success",
                 costUsd: "total_cost_usd" in msg ? msg.total_cost_usd : null,
                 durationMs: msg.duration_ms,
+                inputTokens: turn.inputTokens,
+                outputTokens: turn.outputTokens,
+                cacheReadTokens: turn.cacheReadTokens,
+                mode,
               });
+              this.broadcast({ t: "usage", summary: this.ledger.summarize(this.sessionId) });
               this.setBusy(false);
               break;
+            }
             default:
               break;
           }

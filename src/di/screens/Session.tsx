@@ -3,7 +3,7 @@ import { Icon, RailTitle } from "../primitives";
 import { RailScroll, RailDock, MainColumn } from "../Shell";
 import type { ChatState } from "../control";
 import type { SAMPLE } from "../control";
-import type { ModelRow, SearchHit } from "../../api";
+import type { ModelRow, SearchHit, UsageSummary } from "../../api";
 import type { CavemanMode, SessionState } from "../state";
 
 const MODES: CavemanMode[] = ["off", "lite", "full", "ultra"];
@@ -30,7 +30,7 @@ function activeRow(rows: ModelRow[] | null, model: string | null, active: string
 }
 
 export function SessionScreen({
-  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, onModel, onEffort, onRefreshModels, onAddPin, onRemovePin, onSearch,
+  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, usage, onModel, onEffort, onRefreshModels, onAddPin, onRemovePin, onSearch,
 }: {
   s: SessionState;
   chat: ChatState;
@@ -43,6 +43,7 @@ export function SessionScreen({
   onApproval: (id: string, d: "allow" | "always" | "deny") => void;
   onInterrupt: () => void;
   models: ModelRow[] | null;
+  usage: UsageSummary | null;
   onModel: (m: string) => void;
   onEffort: (e: string | null) => void;
   onRefreshModels: () => void;
@@ -70,13 +71,7 @@ export function SessionScreen({
       <RailScroll bottom={64}>
         <RailTitle style={{ padding: "2px 2px 11px" }}>Session</RailTitle>
 
-        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-          <KpiTile eyebrow="Caveman" value={cavemanSavings ?? (sample.cavemanPercent ? `${s.caveman.savedPct}%` : "—")}
-            unit={cavemanSavings ? "saved" : "context saved"} sampleTag={!cavemanSavings && sample.cavemanPercent}
-            valueColor="var(--di-info)" border="#23415f" bg="#0f2842" eyebrowColor="var(--di-ink-mute)" />
-          <KpiTile eyebrow="RTK" value={`+${s.rtk.gainPct}%`} unit="tokens returned" sampleTag={sample.rtk}
-            valueColor="var(--di-pos)" border="#2a3f2e" bg="#10241a" eyebrowColor="#8fb89a" />
-        </div>
+        <EfficiencyPanel usage={usage} cavemanSavings={cavemanSavings} />
 
         {/* caveman verbosity — writes the real flag via /api/caveman */}
         <div style={{ marginBottom: 16, border: "1px solid #23415f", borderRadius: 11, background: "linear-gradient(180deg,#0f2842,#0b1f34)", padding: "8px 11px 7px" }}>
@@ -427,6 +422,60 @@ function SearchOverlay({ onSearch, onClose }: { onSearch: (q: string) => Promise
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+
+/** Real efficiency instrumentation — every number here is MEASURED from the
+ *  SDK's per-turn usage, never seeded. RTK and caveman are both live features;
+ *  what was missing was honest measurement, so tiles used to show invented
+ *  percentages. A metric with no data says so rather than guessing. */
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+  return String(n);
+}
+
+function EfficiencyPanel({ usage, cavemanSavings }: { usage: UsageSummary | null; cavemanSavings: string | null }) {
+  const has = !!usage && usage.turns > 0;
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <KpiTile eyebrow="Tokens" value={has ? fmtTokens(usage!.inputTokens + usage!.outputTokens) : "—"}
+          unit={has ? `${usage!.turns} turn${usage!.turns === 1 ? "" : "s"}` : "no turns yet"}
+          valueColor="var(--di-info)" border="#23415f" bg="#0f2842" eyebrowColor="var(--di-ink-mute)" />
+        <KpiTile eyebrow="Cache reuse" value={has && usage!.cacheHitPct != null ? `${usage!.cacheHitPct}%` : "—"}
+          unit="prompt cache" valueColor="var(--di-pos)" border="#2a3f2e" bg="#10241a" eyebrowColor="#8fb89a" />
+      </div>
+      {/* Caveman: lifetime savings from its own statusline + a MEASURED
+          per-mode comparison from this session's turns. */}
+      <div style={{ border: "1px solid #6a4a1a", borderRadius: 11, background: "#1a1206", padding: "9px 11px", marginBottom: 8 }}>
+        <div className="di-eyebrow" style={{ color: "#c9a86a", marginBottom: 5, fontSize: 9 }}>Caveman · RTK</div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 6, flexWrap: "wrap" }}>
+          <span className="di-mono" style={{ fontSize: 15, fontWeight: 600, color: "var(--di-warn)" }}>{cavemanSavings ?? "—"}</span>
+          <span style={{ fontSize: 9.5, color: "#a08a5e" }}>lifetime saved</span>
+        </div>
+        {usage?.cavemanDelta ? (
+          <div style={{ fontSize: 10.5, color: "#e9dcc8", marginTop: 6, lineHeight: 1.45 }}>
+            Measured here: <b>{usage.cavemanDelta.outputTokenReductionPct}%</b> fewer output tokens per turn
+            on <b>{usage.cavemanDelta.best}</b> vs <b>{usage.cavemanDelta.worst}</b>.
+          </div>
+        ) : (
+          <div style={{ fontSize: 10, color: "#a08a5e", marginTop: 6, lineHeight: 1.45 }}>
+            Run turns on two different dial settings (3+ each) and the measured token difference appears here.
+          </div>
+        )}
+        {!!usage?.byMode.length && (
+          <div style={{ display: "flex", gap: 5, marginTop: 7, flexWrap: "wrap" }}>
+            {usage.byMode.map((m) => (
+              <span key={m.mode} className="di-mono" style={{ fontSize: 9, color: "#c9a86a", border: "1px solid #4a3a1a", borderRadius: 999, padding: "1px 7px" }}>
+                {m.mode} {Math.round(m.avgOutputTokens)}t/turn ·{m.turns}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

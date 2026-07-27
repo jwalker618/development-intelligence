@@ -90,7 +90,7 @@ function Workbench({
   useEffect(() => { if (live.conn === "reauth") onReauth(); }, [live.conn, onReauth]);
   useEffect(() => { void api.claudeToken().then((r) => setClaudeConnected(!!r.source)).catch(() => setClaudeConnected(true)); }, []);
 
-  const { state, sessions, chat, models, tree, activeDiff, cavemanSavings, sample, conn, error, actions } = live;
+  const { state, sessions, chat, models, usage, tree, activeDiff, cavemanSavings, sample, conn, error, actions } = live;
   const target = sessions.find((s) => s.id === closeTarget);
 
   return (
@@ -103,7 +103,7 @@ function Workbench({
         onCloseSession={setCloseTarget}
         screen={
           <>
-            {view === "session" && <SessionScreen s={state} chat={chat} cavemanSavings={cavemanSavings} sample={sample} claudeConnected={claudeConnected} onConnect={onConnect} onCaveman={actions.setCaveman} onSend={actions.sendMessage} onApproval={actions.resolveApproval} onInterrupt={actions.interrupt} models={models} onModel={actions.setModel} onEffort={actions.setEffort} onRefreshModels={actions.refreshModels} onAddPin={actions.addPin} onRemovePin={actions.removePin} onSearch={actions.search} />}
+            {view === "session" && <SessionScreen s={state} chat={chat} cavemanSavings={cavemanSavings} sample={sample} claudeConnected={claudeConnected} onConnect={onConnect} onCaveman={actions.setCaveman} onSend={actions.sendMessage} onApproval={actions.resolveApproval} onInterrupt={actions.interrupt} models={models} usage={usage} onModel={actions.setModel} onEffort={actions.setEffort} onRefreshModels={actions.refreshModels} onAddPin={actions.addPin} onRemovePin={actions.removePin} onSearch={actions.search} />}
             {view === "changes" && <ChangesScreen s={state} activeDiff={activeDiff} sample={sample} loading={conn === "loading"} onSelect={actions.selectChange} onVerdict={actions.setVerdict} onReviewed={actions.markReviewed} onCommitSync={actions.commitSync} />}
             {view === "files" && <FilesScreen tree={tree} sessionId={sessionId} />}
             {view === "preview" && <PreviewScreen s={state} sample={sample} onViewport={() => undefined} onSendToAgent={() => changeView("session")} />}
