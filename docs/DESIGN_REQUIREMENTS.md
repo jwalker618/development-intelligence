@@ -299,6 +299,55 @@ Nothing renders when nothing is running.
 
 ---
 
+## 7a · The composer's three chip surfaces
+
+Three different kinds of chip now surround the message box, and they are
+currently indistinguishable from each other. That is the design problem.
+
+| Chip | Source | Behaviour | When |
+|---|---|---|---|
+| **Starter chips** | The repo's **real** slash commands with real descriptions (`supportedCommands()`) | Sends immediately | Empty conversation only |
+| **Cold-start trio** | Hardcoded — "Explain this repo", "Add a failing test", … | Sends immediately | Empty conversation, *before* the CLI has reported anything. Measured: no command inventory and no suggestion exist until after turn one |
+| **Follow-up chip** | The **model's own** suggested next step (`promptSuggestions`) | **Fills the composer; does not send** | After a turn, when the model offered one |
+
+Requirements:
+
+- The follow-up chip deliberately does not send. The model may suggest; the
+  human still presses send. That distinction must be legible — right now it
+  looks exactly like the starter chips, which do send.
+- Starter chips currently show `/command` with the description on hover. Hover
+  is not a phone interaction, and a bare `/docx` tells a user nothing.
+- Commands taking arguments are filtered out entirely rather than offered as
+  chips that would fail. If the design wants them, it needs an argument affordance.
+
+## 7b · Turn-level liveness
+
+Two small live indicators now sit beside the working·stop chip:
+
+- **`thinking · 397`** — a real estimate of reasoning tokens for the turn in
+  flight, from the SDK. It appears only while busy and only once non-zero.
+- **Tool cards appear as the model starts emitting the call**, greyed at 60%
+  opacity until the durable event arrives and replaces them. Long-running
+  tools grow an elapsed counter past 3 seconds.
+
+Requirements:
+
+- The provisional-to-settled transition is currently a raw opacity flip. It is
+  the most frequently-seen state change in the product and deserves a
+  considered treatment.
+- The header now holds: title, thinking pill, working·stop, leash, effort,
+  model. See §9.1 — this is the composition problem, concentrated.
+
+## 7c · The turn brake
+
+"Stop after N turns" now sits in the leash menu beneath the spend ceiling.
+
+- Unlike the ceiling it is offered on **every** auth, because a cheap model can
+  loop a long time for very little money while producing enormous review churn.
+- Two numeric limits in one menu (dollars and turns) with different
+  availability rules is confusing as laid out. They are genuinely different
+  brakes; the design should make that legible or separate them.
+
 ## 8 · Settings → Diagnostics, extended
 
 *Current state:* `ClaudeCodeDetail` in `src/di/frontdoor/Settings.tsx`.
@@ -369,6 +418,7 @@ Do not design these; they were considered and rejected on evidence:
 3. **Rewind preview** — right weight for a destructive action.
 4. **The four system row types** — they need a third register.
 5. **Tasks live-vs-palette boundary** — currently one screen, two products.
+5b. **The three chip surfaces** — one of them does not send, and nothing says so.
 6. **Header composition on phone** — blocks 1 and everything else.
 7. Diagnostics as a real troubleshooting surface.
 
@@ -388,6 +438,9 @@ Do not design these; they were considered and rejected on evidence:
 | Rewind | `src/di/screens/Session.tsx` → `UserBubble` |
 | System transcript rows | `src/di/screens/Session.tsx` → `ChatBody` |
 | Live tasks | `src/di/screens/Tasks.tsx` → `InFlight` |
+| Starter / follow-up chips | `src/di/screens/Session.tsx` → `ChatBody`, `Composer` |
+| Thinking pill + streaming tool cards | `src/di/screens/Session.tsx` header, `ChatBody` |
+| Turn brake | `src/di/screens/Session.tsx` → `LeashPill` |
 | Diagnostics detail | `src/di/frontdoor/Settings.tsx` → `ClaudeCodeDetail` |
 
 Evidence for every claim about SDK behaviour in this document is in
