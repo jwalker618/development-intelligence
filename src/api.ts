@@ -99,7 +99,7 @@ export interface ModelCatalog {
 /** Everything the CLI can tell us about the session it is running. */
 export interface ChatStatus {
   signals: {
-    commands: string[]; skills: string[]; agents: string[]; tools: string[];
+    commands: SlashCommandInfo[]; skills: string[]; agents: string[]; tools: string[];
     plugins: Array<{ name: string; version?: string }>;
     mcpServers: Array<{ name: string; status: string }>;
     betas: string[]; outputStyle: string | null; permissionMode: string | null;
@@ -109,6 +109,11 @@ export interface ChatStatus {
   /** Agent-initiated work in flight (subagents, background commands). */
   tasks: LiveTask[];
   cliState: string | null;
+  /** Live reasoning-token estimate for the turn in flight. */
+  thinkingTokens: number;
+  /** The model's own suggested follow-up, when it offered one. */
+  suggestion: string | null;
+  maxTurns: number | null;
   permissionMode: string;
   readOnly: boolean;
   budgetUsd: number | null;
@@ -124,6 +129,8 @@ export interface ChatStatus {
   account: { email?: string; organization?: string; subscriptionType?: string; apiProvider?: string } | null;
   limits: { status?: string; resetsAt?: number; rateLimitType?: string; utilization?: number } | null;
 }
+
+export interface SlashCommandInfo { name: string; description: string; argumentHint?: string }
 
 export interface LiveTask { id: string; label: string; status: string; detail: string | null; at: number }
 
@@ -433,6 +440,11 @@ export const api = {
     req<RewindResult>(`/api/sessions/${id}/chat/rewind`, {
       method: "POST",
       body: JSON.stringify({ uuid, dryRun }),
+    }),
+  setMaxTurns: (id: string, maxTurns: number | null) =>
+    req<{ maxTurns: number | null }>(`/api/sessions/${id}/chat/max-turns`, {
+      method: "POST",
+      body: JSON.stringify({ maxTurns }),
     }),
   setBudget: (id: string, budgetUsd: number | null) =>
     req<{ budgetUsd: number | null }>(`/api/sessions/${id}/chat/budget`, {

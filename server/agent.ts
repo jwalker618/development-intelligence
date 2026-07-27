@@ -10,6 +10,7 @@ import {
   type PermissionUpdate,
   type Query,
   type RewindFilesResult,
+  type SDKPartialAssistantMessage,
   type SDKSystemMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -100,7 +101,9 @@ const FALLBACK_MODEL = "claude-sonnet-4-5";
  *  otherwise have to hardcode. Free: it all arrives on a message we already
  *  receive. Everything here is CLI-authored, so it is display-only. */
 export interface SessionSignals {
-  commands: string[];
+  /** Real slash commands with their descriptions — what the suggestion chips
+   *  are built from instead of a hardcoded trio. */
+  commands: SlashCommandInfo[];
   skills: string[];
   agents: string[];
   tools: string[];
@@ -132,6 +135,10 @@ export interface HookRun {
   outcome: "success" | "error" | "cancelled";
   exitCode: number | null;
 }
+
+/** A slash command as the CLI describes it. `argumentHint` is shown verbatim
+ *  when present ("<file>") so a chip never implies a bare command works. */
+export interface SlashCommandInfo { name: string; description: string; argumentHint?: string }
 
 const emptySignals = (): SessionSignals => ({
   commands: [], skills: [], agents: [], tools: [], plugins: [], mcpServers: [],
@@ -167,6 +174,21 @@ function dominantModel(msg: Record<string, unknown>): string | null {
     if (out > bestOut) { bestOut = out; best = model; }
   }
   return best;
+}
+
+/** Normalise a command list from either shape the CLI uses: bare strings on
+ *  `system/init`, full objects from `supportedCommands()`. */
+function toCommands(xs: unknown[]): SlashCommandInfo[] {
+  return xs
+    .map((x) => {
+      if (typeof x === "string") return { name: x, description: "" };
+      const o = (x ?? {}) as Record<string, unknown>;
+      const name = String(o.name ?? "");
+      return name
+        ? { name, description: String(o.description ?? ""), ...(o.argumentHint ? { argumentHint: String(o.argumentHint) } : {}) }
+        : null;
+    })
+    .filter((c): c is SlashCommandInfo => !!c);
 }
 
 function blockText(content: unknown): string {
@@ -237,6 +259,10 @@ export class AgentChat {
   private rateLimit: Record<string, unknown> | null = null;
   /** Cached account identity — one control request per query lifetime. */
   private accountCache: Record<string, unknown> | null = null;
+  /** Live reasoning-token estimate for the turn in flight. */
+  private thinkingTokens = 0;
+  /** The model's own suggested follow-up, if it offered one. */
+  private suggestion: string | null = null;
 
   private ledger: UsageLedger;
 
@@ -382,6 +408,9 @@ export class AgentChat {
       parent_tool_use_id: null,
       uuid,
     } as SDKUserMessage;
+    // A new turn invalidates the previous turn's ephemerals.
+    this.thinkingTokens = 0;
+    this.suggestion = null;
     this.ensureRunning();
     const waiter = this.inputWaiters.shift();
     if (waiter) waiter(msg);
@@ -547,7 +576,9 @@ export class AgentChat {
         this.active = m.model;
         this.saveMeta();
         this.signals = {
-          commands: m.slash_commands ?? [],
+          // system/init gives names only; hydrateSignals() upgrades these to
+          // full rows via supportedCommands() when the query is warm.
+          commands: (m.slash_commands ?? []).map((name) => ({ name, description: "" })),
           skills: m.skills ?? [],
           agents: m.agents ?? [],
           tools: m.tools ?? [],
@@ -645,14 +676,48 @@ export class AgentChat {
       // A mid-session push of the command list (skills discovered as the agent
       // moves around). The docs are explicit: REPLACE, don't merge.
       case "commands_changed": {
-        const cmds = (msg as { commands?: Array<{ name?: string } | string> }).commands;
+        const cmds = (msg as { commands?: Array<Record<string, unknown> | string> }).commands;
         if (Array.isArray(cmds)) {
-          this.signals.commands = cmds.map((c) => (typeof c === "string" ? c : c.name ?? "")).filter(Boolean);
+          this.signals.commands = toCommands(cmds);
           this.broadcast({ t: "signals", signals: this.signals });
         }
         break;
       }
 
+      // A live estimate of the current reasoning burn. Ephemeral by design:
+      // it is a "still thinking" signal, not transcript history.
+      case "thinking_tokens": {
+        this.thinkingTokens = Number((msg as { estimated_tokens?: number }).estimated_tokens ?? 0);
+        this.broadcast({ t: "thinking", tokens: this.thinkingTokens });
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  /**
+   * Partial-message stream events.
+   *
+   * Text deltas drive the streaming bubble. `content_block_start` for a
+   * tool_use is the one that matters for perceived latency: it fires the
+   * moment the model begins emitting the call, seconds before the block
+   * completes and the durable `tool` event lands. The provisional card is
+   * keyed by the SAME toolUseId the durable event carries, so the client
+   * REPLACES rather than appends — the identity trap that made streamed text
+   * render twice applies here too, and is solved the same way.
+   */
+  private onStream(ev: SDKPartialAssistantMessage["event"]): void {
+    switch (ev.type) {
+      case "content_block_delta":
+        if (ev.delta.type === "text_delta") this.broadcast({ t: "delta", text: ev.delta.text });
+        break;
+      case "content_block_start":
+        if (ev.content_block.type === "tool_use") {
+          this.broadcast({ t: "tool_start", toolUseId: ev.content_block.id, name: ev.content_block.name });
+        }
+        break;
       default:
         break;
     }
@@ -706,8 +771,24 @@ export class AgentChat {
   }
 
   /** Live CLI inventories + hook liveness, for the client and the API. */
-  status(): { signals: SessionSignals; hooks: HookRun[]; cliState: string | null; tasks: LiveTask[] } {
-    return { signals: this.signals, hooks: this.hookRuns, cliState: this.cliState, tasks: [...this.tasks.values()] };
+  status(): {
+    signals: SessionSignals; hooks: HookRun[]; cliState: string | null;
+    tasks: LiveTask[]; thinkingTokens: number; suggestion: string | null; maxTurns: number | null;
+  } {
+    return {
+      signals: this.signals, hooks: this.hookRuns, cliState: this.cliState,
+      tasks: [...this.tasks.values()], thinkingTokens: this.thinkingTokens,
+      suggestion: this.suggestion, maxTurns: this.meta.maxTurns ?? null,
+    };
+  }
+
+  /** Runaway-loop brake. Orthogonal to cost: a cheap model can loop a long
+   *  time for very little money while producing enormous review churn. */
+  async setMaxTurns(turns: number | null): Promise<void> {
+    this.meta.maxTurns = turns && turns > 0 ? Math.floor(turns) : undefined;
+    this.saveMeta();
+    await this.recycle();
+    this.broadcast({ t: "maxTurns", maxTurns: this.meta.maxTurns ?? null });
   }
 
   /**
@@ -727,7 +808,9 @@ export class AgentChat {
       Array.isArray(xs)
         ? xs.map((x) => (typeof x === "string" ? x : String((x as { name?: string })?.name ?? ""))).filter(Boolean)
         : [];
-    if (init.commands?.length) this.signals.commands = named(init.commands);
+    // supportedCommands() is the only source with descriptions; the init
+    // message carries bare names.
+    if (init.commands?.length) this.signals.commands = toCommands(init.commands as unknown[]);
     if (init.agents?.length) this.signals.agents = named(init.agents);
     if (init.output_style) this.signals.outputStyle = init.output_style;
     if (init.account) this.accountCache = init.account as Record<string, unknown>;
@@ -926,6 +1009,10 @@ export class AgentChat {
         // Inert unless plan mode is on; ready the moment it is.
         planModeInstructions: PLAN_INSTRUCTIONS,
         ...(this.meta.maxTurns ? { maxTurns: this.meta.maxTurns } : {}),
+        // One model-authored follow-up chip after a turn. Honest scope: the CLI
+        // suppresses suggestions on turn one, which is exactly when the
+        // hardcoded starter chips render — cold start is unchanged.
+        promptSuggestions: true,
         ...(this.meta.budgetUsd ? { maxBudgetUsd: this.meta.budgetUsd } : {}),
         // Undo over agent edits. Anchored to the uuid we stamp in send().
         enableFileCheckpointing: true,
@@ -988,12 +1075,21 @@ export class AgentChat {
               this.onSystem(msg);
               break;
             case "stream_event": {
-              const ev = msg.event as {
-                type: string;
-                delta?: { type?: string; text?: string };
-              };
-              if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta") {
-                this.broadcast({ t: "delta", text: ev.delta.text ?? "" });
+              this.onStream(msg.event);
+              break;
+            }
+            // A tool that is taking a while. Purely a liveness signal for the
+            // card that is already on screen.
+            case "tool_progress": {
+              const t = msg as unknown as { tool_use_id?: string; elapsed_time_seconds?: number };
+              this.broadcast({ t: "tool_elapsed", toolUseId: t.tool_use_id, seconds: Math.round(t.elapsed_time_seconds ?? 0) });
+              break;
+            }
+            // The model's own one-line account of a run of tool calls.
+            case "tool_use_summary": {
+              const t = msg as unknown as { summary?: string; preceding_tool_use_ids?: string[] };
+              if (t.summary) {
+                this.broadcast({ t: "tool_summary", summary: String(t.summary).slice(0, 300), toolUseIds: t.preceding_tool_use_ids ?? [] });
               }
               break;
             }
@@ -1056,6 +1152,13 @@ export class AgentChat {
               });
               this.broadcast({ t: "usage", summary: this.ledger.summarize(this.ws.id) });
               this.inferBusy(false);
+              break;
+            }
+            case "prompt_suggestion": {
+              // Live only. Persisting it would put a model-authored sentence in
+              // the transcript that the user never said or received.
+              this.suggestion = String((msg as unknown as { suggestion?: string }).suggestion ?? "").slice(0, 200);
+              this.broadcast({ t: "suggestion", suggestion: this.suggestion });
               break;
             }
             case "rate_limit_event": {

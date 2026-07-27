@@ -49,6 +49,7 @@ export interface Actions {
   setPermissionMode: (mode: string) => void;
   setReadOnly: (on: boolean) => void;
   setBudget: (usd: number | null) => void;
+  setMaxTurns: (turns: number | null) => void;
   refreshStatus: () => void;
   /** Preview what a rewind would restore. Never touches the disk. */
   previewRewind: (uuid: string) => Promise<RewindResult>;
@@ -69,7 +70,7 @@ export function useControl(sessionId: string | null): Live {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [chat, setChat] = useState<ChatState>({
     messages: [], busy: false, model: null, activeModel: null, effort: null, pendingApprovalId: null,
-    permissionMode: "default", readOnly: false, budgetUsd: null, signals: null, hooks: [], limits: null, tasks: [],
+    permissionMode: "default", readOnly: false, budgetUsd: null, signals: null, hooks: [], limits: null, tasks: [], thinkingTokens: 0, suggestion: null, maxTurns: null,
   });
   const [trees, setTrees] = useState<TreeNode[]>([]);
   const [repos, setRepos] = useState<RepoRef[]>([]);
@@ -144,6 +145,16 @@ export function useControl(sessionId: string | null): Live {
         onDelta: (text) => setChat((c) => appendDelta(c, text)),
         onUsage: (u) => setUsage(u),
         onHook: (run) => setChat((c) => ({ ...c, hooks: [...c.hooks, run].slice(-40) })),
+        // A tool card the instant the model starts emitting the call, seconds
+        // before the block completes. Keyed so the durable event replaces it.
+        onToolStart: (toolUseId, name) => setChat((c) =>
+          c.messages.some((m) => m.toolUseId === toolUseId)
+            ? c
+            : { ...c, messages: [...c.messages, { id: `t${toolUseId}`, role: "tool", text: name, toolUseId, provisional: true }] }),
+        onToolElapsed: (toolUseId, seconds) => setChat((c) => ({
+          ...c,
+          messages: c.messages.map((m) => (m.toolUseId === toolUseId ? { ...m, elapsed: seconds } : m)),
+        })),
         onConn: (cc) => setConn(cc),
       });
     })();
@@ -182,6 +193,9 @@ export function useControl(sessionId: string | null): Live {
           hooks: st.hooks as ChatState["hooks"],
           limits: st.limits,
           tasks: st.tasks ?? [],
+          thinkingTokens: st.thinkingTokens ?? 0,
+          suggestion: st.suggestion ?? null,
+          maxTurns: st.maxTurns ?? null,
         }));
       }
     } catch { if (statusFor.current === id) setStatus(null); }
@@ -298,6 +312,11 @@ export function useControl(sessionId: string | null): Live {
       if (!sessionId) return;
       setChat((c) => ({ ...c, readOnly: on }));
       void api.setReadOnly(sessionId, on).then(() => loadStatus(sessionId)).catch(guard);
+    },
+    setMaxTurns: (turns) => {
+      if (!sessionId) return;
+      setChat((c) => ({ ...c, maxTurns: turns }));
+      void api.setMaxTurns(sessionId, turns).then(() => loadStatus(sessionId)).catch(guard);
     },
     setBudget: (usd) => {
       if (!sessionId) return;

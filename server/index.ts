@@ -385,6 +385,18 @@ router.on("POST", "/api/sessions/:id/chat/read-only", async ({ params, body }) =
   return { ok: true, readOnly: b.readOnly };
 });
 
+/** Runaway-loop brake. Null clears it. */
+router.on("POST", "/api/sessions/:id/chat/max-turns", async ({ params, body }) => {
+  const b = (body ?? {}) as { maxTurns?: number | null };
+  const t = b.maxTurns;
+  if (t !== null && t !== undefined && (typeof t !== "number" || !Number.isFinite(t) || t < 1 || t > 200)) {
+    throw new HttpError(400, "maxTurns must be between 1 and 200, or null");
+  }
+  const s = manager.get(params.id);
+  await chats.get(s).setMaxTurns(t ?? null);
+  return { ok: true, maxTurns: t ?? null };
+});
+
 /** Hard spend ceiling. Null clears it. */
 router.on("POST", "/api/sessions/:id/chat/budget", async ({ params, body }) => {
   const b = (body ?? {}) as { budgetUsd?: number | null };

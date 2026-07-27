@@ -30,7 +30,7 @@ function activeRow(rows: ModelRow[] | null, model: string | null, active: string
 }
 
 export function SessionScreen({
-  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, usage, status, onModel, onEffort, onRefreshModels, onPermissionMode, onReadOnly, onBudget, onPreviewRewind, onRewind, onAddPin, onRemovePin, onSearch,
+  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, usage, status, onModel, onEffort, onRefreshModels, onPermissionMode, onReadOnly, onBudget, onMaxTurns, onPreviewRewind, onRewind, onAddPin, onRemovePin, onSearch,
 }: {
   s: SessionState;
   chat: ChatState;
@@ -51,6 +51,7 @@ export function SessionScreen({
   onPermissionMode: (mode: string) => void;
   onReadOnly: (on: boolean) => void;
   onBudget: (usd: number | null) => void;
+  onMaxTurns: (t: number | null) => void;
   onPreviewRewind: (uuid: string) => Promise<RewindResult>;
   onRewind: (uuid: string) => Promise<RewindResult>;
   onAddPin: (icon: string, label: string) => void;
@@ -162,6 +163,12 @@ export function SessionScreen({
         <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 9, padding: "14px 20px", borderBottom: "1px solid var(--cc-rule)" }}>
           <Icon name="asterisk" size={16} color="#c9d2dc" />
           <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--cc-ink)" }}>Claude Code</span>
+          {chat.busy && chat.thinkingTokens > 0 && (
+            <span className="di-mono" title="Estimated reasoning tokens for this turn"
+              style={{ display: "inline-flex", alignItems: "center", gap: 5, height: 22, padding: "0 9px", borderRadius: 999, background: "#141d33", border: "1px solid #2c3f5a", fontSize: 10.5, color: "#8fa6d0" }}>
+              <Icon name="sparkles" size={10} color="#8fa6d0" />thinking · {fmtTokens(chat.thinkingTokens)}
+            </span>
+          )}
           {chat.busy && (
             <button className="di-btn" onClick={onInterrupt} style={{ display: "inline-flex", alignItems: "center", gap: 5, height: 22, padding: "0 9px", borderRadius: 999, background: "#132018", border: "1px solid #23402e", fontSize: 10.5, color: "#5fbf7f", cursor: "pointer" }}>
               <span style={{ width: 6, height: 6, borderRadius: 999, background: "#5fbf7f", animation: "di-pulse 1.4s infinite" }} />working · stop
@@ -173,10 +180,12 @@ export function SessionScreen({
             mode={chat.permissionMode}
             readOnly={chat.readOnly}
             budgetUsd={chat.budgetUsd}
+            maxTurns={chat.maxTurns}
             costsAreReal={status?.costsAreReal ?? false}
             onMode={onPermissionMode}
             onReadOnly={onReadOnly}
             onBudget={onBudget}
+            onMaxTurns={onMaxTurns}
           />
           {/* reasoning-effort picker — only for models that support it */}
           {(() => { const r = activeRow(models, chat.model, chat.activeModel); const lv = r ? (r.supportsEffort ? r.supportedEffortLevels : []) : []; return lv.length > 0 ? <EffortPicker value={chat.effort} levels={lv} onEffort={onEffort} /> : null; })()}
@@ -222,7 +231,9 @@ export function SessionScreen({
           ? <NotConnected onConnect={onConnect} />
           : <ChatBody chat={chat} onApproval={onApproval} onSend={onSend} onPreviewRewind={onPreviewRewind} onRewind={onRewind} />}
 
-        {claudeConnected !== false && chat.messages.length > 0 && <Composer onSend={onSend} />}
+        {claudeConnected !== false && chat.messages.length > 0 && (
+          <Composer onSend={onSend} suggestion={!chat.busy ? chat.suggestion : null} />
+        )}
       </MainColumn>
     </>
   );
@@ -241,7 +252,15 @@ function NotConnected({ onConnect }: { onConnect: () => void }) {
   );
 }
 
-const SUGGESTIONS = ["Explain this repo", "Add a failing test", "Fix the pending filter"];
+/** Cold-start chips. MEASURED: the CLI emits no slash-command inventory and no
+ *  model-authored suggestion until after turn one, so a brand-new session has
+ *  nothing real to offer — these three cover exactly that gap and are replaced
+ *  by the repo's actual commands the moment the CLI reports them. */
+const STARTERS = ["Explain this repo", "Add a failing test", "Fix the pending filter"];
+
+/** Commands that are noise as a starting point — they act on a conversation
+ *  that does not exist yet, or on DI's own surfaces. */
+const CHIP_SKIP = /^(help|clear|exit|quit|compact|usage|cost|stats|resume|logout|login|config|status|doctor|upgrade|release-notes|bug|feedback|privacy|terms|vim|theme|model|memory)$/i;
 
 function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind }: {
   chat: ChatState;
@@ -250,6 +269,15 @@ function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind }: {
   onPreviewRewind: (uuid: string) => Promise<RewindResult>;
   onRewind: (uuid: string) => Promise<RewindResult>;
 }) {
+  // Real slash commands when the CLI has told us what this repo has; the
+  // hardcoded trio only while it hasn't.
+  const real = (chat.signals?.commands ?? [])
+    .filter((c) => c.name && !CHIP_SKIP.test(c.name) && !c.argumentHint)
+    .slice(0, 6);
+  const starters = real.length
+    ? real.map((c) => ({ label: `/${c.name}`, send: `/${c.name}`, title: c.description || `/${c.name}`, command: true }))
+    : STARTERS.map((t) => ({ label: t, send: t, title: t, command: false }));
+
   if (chat.messages.length === 0) {
     return (
       <>
@@ -258,9 +286,9 @@ function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind }: {
           <div style={{ fontSize: 17, fontWeight: 600, color: "var(--di-ink)", marginBottom: 7 }}>What should Claude build?</div>
           <div style={{ fontSize: 12.5, color: "var(--di-ink-mute)", marginBottom: 20 }}>Describe a change, paste an error, or pick a starting point.</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 9, justifyContent: "center", maxWidth: 440 }}>
-            {SUGGESTIONS.map((sug) => (
-              <button key={sug} className="di-btn" onClick={() => onSend(sug)} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "9px 13px", border: "1px solid var(--di-rule)", borderRadius: 999, background: "#0e2032", color: "var(--di-ink-soft)", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                <Icon name="sparkles" size={12} color="var(--di-info)" />{sug}
+            {starters.map((c) => (
+              <button key={c.label} className="di-btn" title={c.title} onClick={() => onSend(c.send)} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "9px 13px", border: "1px solid var(--di-rule)", borderRadius: 999, background: "#0e2032", color: "var(--di-ink-soft)", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                <Icon name={c.command ? "square-terminal" : "sparkles"} size={12} color="var(--di-info)" />{c.label}
               </button>
             ))}
           </div>
@@ -279,10 +307,14 @@ function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind }: {
           <div key={m.id} style={{ maxWidth: "86%", fontSize: 12.5, lineHeight: 1.6, color: "#aeb9c5", whiteSpace: "pre-wrap" }}>{m.text}</div>
         );
         if (m.role === "tool") return (
-          <div key={m.id} style={{ width: "100%", maxWidth: 520, border: "1px solid var(--cc-rule)", borderRadius: 9, background: "#0f1720" }}>
+          <div key={m.id} style={{ width: "100%", maxWidth: 520, border: "1px solid var(--cc-rule)", borderRadius: 9, background: "#0f1720", opacity: m.provisional ? 0.6 : 1 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px" }}>
               <Icon name="file-pen" size={13} color="#7f8c9a" />
-              <span className="di-mono" style={{ fontSize: 11, color: "#c9d2dc" }}>{m.text}{m.file ? ` · ${m.file}` : ""}</span>
+              <span className="di-mono" style={{ fontSize: 11, color: "#c9d2dc", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m.text}{m.file ? ` · ${m.file}` : ""}</span>
+              {/* Elapsed time only once it is long enough to be worth saying. */}
+              {typeof m.elapsed === "number" && m.elapsed >= 3 && (
+                <span className="di-mono" style={{ flex: "0 0 auto", fontSize: 10, color: "#6f8296" }}>{m.elapsed}s</span>
+              )}
             </div>
           </div>
         );
@@ -419,12 +451,22 @@ function UserBubble({ m, onPreviewRewind, onRewind }: {
   );
 }
 
-function Composer({ onSend }: { onSend: (t: string) => void }) {
+function Composer({ onSend, suggestion }: { onSend: (t: string) => void; suggestion?: string | null }) {
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
   const send = () => { const t = text.trim(); if (!t) return; onSend(t); setText(""); if (ref.current) ref.current.style.height = "auto"; };
   return (
     <div style={{ flex: "0 0 auto", padding: "14px 20px", borderTop: "1px solid var(--cc-rule)" }}>
+      {/* The model's OWN suggested next step. One chip, offered not assumed —
+          tapping fills the composer rather than sending, so the human still
+          presses send. */}
+      {suggestion && !text && (
+        <button className="di-btn" onClick={() => { setText(suggestion); ref.current?.focus(); }}
+          style={{ display: "inline-flex", alignItems: "center", gap: 7, maxWidth: "100%", marginBottom: 9, padding: "7px 12px", border: "1px solid #2c5075", borderRadius: 999, background: "#0e2032", color: "var(--di-ink-soft)", fontSize: 11.5, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+          <Icon name="sparkles" size={11} color="var(--di-info)" style={{ flex: "0 0 auto" }} />
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{suggestion}</span>
+        </button>
+      )}
       <div style={{ border: "1px solid #33414f", borderRadius: 12, background: "#0f1720", padding: "11px 13px", display: "flex", alignItems: "center", gap: 10 }}>
         <textarea ref={ref} value={text} onChange={(e) => setText(e.target.value)} rows={1} placeholder="Message Claude Code…"
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
@@ -715,17 +757,20 @@ const LEASH: Array<{ id: string; label: string; sub: string }> = [
   { id: "dontAsk", label: "Fail closed", sub: "Deny anything not pre-approved" },
 ];
 
-function LeashPill({ mode, readOnly, budgetUsd, costsAreReal, onMode, onReadOnly, onBudget }: {
+function LeashPill({ mode, readOnly, budgetUsd, maxTurns, costsAreReal, onMode, onReadOnly, onBudget, onMaxTurns }: {
   mode: string;
   readOnly: boolean;
   budgetUsd: number | null;
+  maxTurns: number | null;
   costsAreReal: boolean;
   onMode: (m: string) => void;
   onReadOnly: (on: boolean) => void;
   onBudget: (usd: number | null) => void;
+  onMaxTurns: (t: number | null) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [budgetDraft, setBudgetDraft] = useState("");
+  const [turnsDraft, setTurnsDraft] = useState("");
   const current = LEASH.find((l) => l.id === mode) ?? LEASH[0];
   const tone = readOnly ? "var(--di-pos)" : mode === "default" ? "var(--di-info)" : "var(--di-warn)";
   return (
@@ -767,6 +812,26 @@ function LeashPill({ mode, readOnly, budgetUsd, costsAreReal, onMode, onReadOnly
                 <span style={{ display: "block", fontSize: 10.5, color: "#6f8296", lineHeight: 1.4 }}>Write, Edit and Bash are removed from the session — not just discouraged.</span>
               </span>
             </label>
+
+            {/* A cheap model can loop for a long time for very little money
+                while producing enormous review churn — so this brake is
+                orthogonal to the spend one, and is offered on every auth. */}
+            <div style={{ padding: "10px 11px", borderTop: "1px solid #17293a" }}>
+              <div className="di-eyebrow" style={{ fontSize: 9, marginBottom: 7 }}>Stop after</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, height: 32, padding: "0 10px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "#0e2032" }}>
+                  <input value={turnsDraft} onChange={(e) => setTurnsDraft(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { const n = Number(turnsDraft); onMaxTurns(Number.isFinite(n) && n > 0 ? n : null); setOpen(false); } }}
+                    placeholder={maxTurns ? String(maxTurns) : "no limit"}
+                    className="di-mono" style={{ flex: 1, minWidth: 0, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 12 }} />
+                  <span style={{ fontSize: 11, color: "#6f8296" }}>turns</span>
+                </div>
+                {maxTurns !== null && (
+                  <button className="di-btn" onClick={() => { onMaxTurns(null); setTurnsDraft(""); }}
+                    style={{ flex: "0 0 auto", height: 32, padding: "0 11px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 11.5, cursor: "pointer" }}>Clear</button>
+                )}
+              </div>
+            </div>
 
             {costsAreReal ? (
               <div style={{ padding: "10px 11px", borderTop: "1px solid #17293a" }}>
