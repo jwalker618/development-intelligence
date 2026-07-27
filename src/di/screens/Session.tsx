@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon, RailTitle } from "../primitives";
 import { RailScroll, RailDock, MainColumn } from "../Shell";
-import type { ChatMsg, ChatState } from "../control";
+import type { ChatMsg, ChatState, SlashCommandInfo } from "../control";
 import type { SAMPLE } from "../control";
 import type { ChatStatus, ModelRow, RewindResult, SearchHit, UsageSummary } from "../../api";
 import type { CavemanMode, SessionState } from "../state";
@@ -66,6 +66,8 @@ export function SessionScreen({
   const [searchOpen, setSearchOpen] = useState(false);
   // Lifted so a Blocked transcript row can open the very control it names.
   const [leashOpen, setLeashOpen] = useState(false);
+  // Lifted so a "fills the box" chip can put text in the composer.
+  const [draft, setDraft] = useState("");
 
   // ⌘K / Ctrl-K opens transcript search.
   useEffect(() => {
@@ -166,10 +168,14 @@ export function SessionScreen({
         <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 9, padding: "14px 20px", borderBottom: "1px solid var(--cc-rule)" }}>
           <Icon name="asterisk" size={16} color="#c9d2dc" />
           <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--cc-ink)" }}>Claude Code</span>
+          {/* Thinking is not a sixth pill — three rising bars in a slim mono
+              chip, and on the phone it is what the working chip SAYS while
+              busy. That is what makes the header fit (47b). */}
           {chat.busy && chat.thinkingTokens > 0 && (
             <span className="di-mono" title="Estimated reasoning tokens for this turn"
-              style={{ display: "inline-flex", alignItems: "center", gap: 5, height: 22, padding: "0 9px", borderRadius: 999, background: "#141d33", border: "1px solid #2c3f5a", fontSize: 10.5, color: "#8fa6d0" }}>
-              <Icon name="sparkles" size={10} color="#8fa6d0" />thinking · {fmtTokens(chat.thinkingTokens)}
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 22, padding: "0 10px", borderRadius: 999, background: "#141d33", border: "1px solid #2c3f5a", fontSize: 10.5, color: "#8fa6d0" }}>
+              <span className="di-rise" style={{ display: "inline-flex", alignItems: "flex-end", gap: 1.5, height: 9 }}><i /><i /><i /></span>
+              {fmtTokens(chat.thinkingTokens)}
             </span>
           )}
           {chat.busy && (
@@ -199,10 +205,10 @@ export function SessionScreen({
 
         {claudeConnected === false
           ? <NotConnected onConnect={onConnect} />
-          : <ChatBody chat={chat} onApproval={onApproval} onSend={onSend} onPreviewRewind={onPreviewRewind} onRewind={onRewind} onOpenLeash={() => setLeashOpen(true)} onOpenDiagnostics={onOpenDiagnostics} />}
+          : <ChatBody chat={chat} onApproval={onApproval} onSend={onSend} onPreviewRewind={onPreviewRewind} onRewind={onRewind} onOpenLeash={() => setLeashOpen(true)} onOpenDiagnostics={onOpenDiagnostics} onFill={setDraft} draft={draft} setDraft={setDraft} />}
 
         {claudeConnected !== false && chat.messages.length > 0 && (
-          <Composer onSend={onSend} suggestion={!chat.busy ? chat.suggestion : null} />
+          <Composer onSend={onSend} suggestion={!chat.busy ? chat.suggestion : null} text={draft} setText={setDraft} />
         )}
       </MainColumn>
     </>
@@ -228,11 +234,26 @@ function NotConnected({ onConnect }: { onConnect: () => void }) {
  *  by the repo's actual commands the moment the CLI reports them. */
 const STARTERS = ["Explain this repo", "Add a failing test", "Fix the pending filter"];
 
+/**
+ * Which commands become starter chips.
+ *
+ * CLI order is preserved within each shape, but both shapes get a place: a
+ * plain `slice(0, 6)` over this CLI's list returned six argument-less skills
+ * and the dashed "fills the box" chip never appeared, which hides the very
+ * distinction 47a exists to draw.
+ */
+function pickStarters(all: SlashCommandInfo[]): SlashCommandInfo[] {
+  const usable = all.filter((c) => c.name && !CHIP_SKIP.test(c.name));
+  const plain = usable.filter((c) => !c.argumentHint);
+  const withArgs = usable.filter((c) => c.argumentHint);
+  return [...plain.slice(0, 4), ...withArgs.slice(0, 2)];
+}
+
 /** Commands that are noise as a starting point — they act on a conversation
  *  that does not exist yet, or on DI's own surfaces. */
 const CHIP_SKIP = /^(help|clear|exit|quit|compact|usage|cost|stats|resume|logout|login|config|status|doctor|upgrade|release-notes|bug|feedback|privacy|terms|vim|theme|model|memory)$/i;
 
-function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind, onOpenLeash, onOpenDiagnostics }: {
+function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind, onOpenLeash, onOpenDiagnostics, onFill, draft, setDraft }: {
   chat: ChatState;
   onApproval: (id: string, d: "allow" | "always" | "deny" | "stop", input?: Record<string, unknown>) => void;
   onSend: (t: string) => void;
@@ -241,15 +262,16 @@ function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind, onOpenL
   /** A blocked row names the thing you would go and change. */
   onOpenLeash: () => void;
   onOpenDiagnostics: () => void;
+  /** Put text in the composer without sending it. */
+  onFill: (text: string) => void;
+  draft: string;
+  setDraft: (v: string) => void;
 }) {
   // Real slash commands when the CLI has told us what this repo has; the
-  // hardcoded trio only while it hasn't.
-  const real = (chat.signals?.commands ?? [])
-    .filter((c) => c.name && !CHIP_SKIP.test(c.name) && !c.argumentHint)
-    .slice(0, 6);
-  const starters = real.length
-    ? real.map((c) => ({ label: `/${c.name}`, send: `/${c.name}`, title: c.description || `/${c.name}`, command: true }))
-    : STARTERS.map((t) => ({ label: t, send: t, title: t, command: false }));
+  // hardcoded trio only while it hasn't. Commands taking ARGUMENTS come back
+  // (47a) — they fill the composer instead of sending, which is honest about
+  // what a bare `/compress` would do.
+  const real = pickStarters(chat.signals?.commands ?? []);
 
   if (chat.messages.length === 0) {
     return (
@@ -258,15 +280,22 @@ function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind, onOpenL
           <div style={{ width: 56, height: 56, marginBottom: 16, borderRadius: 15, background: "#0e2233", border: "1px solid var(--di-rule)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="sparkles" size={26} color="var(--di-info)" /></div>
           <div style={{ fontSize: 17, fontWeight: 600, color: "var(--di-ink)", marginBottom: 7 }}>What should Claude build?</div>
           <div style={{ fontSize: 12.5, color: "var(--di-ink-mute)", marginBottom: 20 }}>Describe a change, paste an error, or pick a starting point.</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 9, justifyContent: "center", maxWidth: 440 }}>
-            {starters.map((c) => (
-              <button key={c.label} className="di-btn" title={c.title} onClick={() => onSend(c.send)} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "9px 13px", border: "1px solid var(--di-rule)", borderRadius: 999, background: "#0e2032", color: "var(--di-ink-soft)", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                <Icon name={c.command ? "square-terminal" : "sparkles"} size={12} color="var(--di-info)" />{c.label}
-              </button>
-            ))}
+          {/* Two chips per row at desktop width — 260px cards in a 440px box
+              stacked one-per-row, which read as a list rather than a palette. */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 9, justifyContent: "center", maxWidth: 560 }}>
+            {real.length > 0
+              ? real.map((c) => <CommandChip key={c.name} c={c} onSend={onSend} onFill={onFill} />)
+              : STARTERS.map((t) => (
+                /* Cold start: no description to print, so a pill rather than
+                   a two-line chip, and aux indigo to say "not from your repo". */
+                <button key={t} className="di-btn" onClick={() => onSend(t)}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "9px 14px", border: "1px solid #2a3352", borderRadius: 999, background: "#111a33", color: "var(--di-ink-soft)", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                  <Icon name="arrow-up" size={11} color="var(--di-aux)" />{t}
+                </button>
+              ))}
           </div>
         </div>
-        <Composer onSend={onSend} />
+        <Composer onSend={onSend} text={draft} setText={setDraft} />
       </>
     );
   }
@@ -279,18 +308,31 @@ function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind, onOpenL
         if (m.role === "agent") return (
           <div key={m.id} style={{ maxWidth: "86%", fontSize: 12.5, lineHeight: 1.6, color: "#aeb9c5", whiteSpace: "pre-wrap" }}>{m.text}</div>
         );
-        if (m.role === "tool") return (
-          <div key={m.id} style={{ width: "100%", maxWidth: 520, border: "1px solid var(--cc-rule)", borderRadius: 9, background: "#0f1720", opacity: m.provisional ? 0.6 : 1 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px" }}>
-              <Icon name="file-pen" size={13} color="#7f8c9a" />
-              <span className="di-mono" style={{ fontSize: 11, color: "#c9d2dc", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m.text}{m.file ? ` · ${m.file}` : ""}</span>
-              {/* Elapsed time only once it is long enough to be worth saying. */}
-              {typeof m.elapsed === "number" && m.elapsed >= 3 && (
-                <span className="di-mono" style={{ flex: "0 0 auto", fontSize: 10, color: "#6f8296" }}>{m.elapsed}s</span>
-              )}
+        // Provisional → settled in a box that never changes size: border
+        // dashed → hairline, text ink-mute → ink, and a shimmering slot
+        // cross-fading to the real figure. Nothing slides, nothing pops (47b).
+        if (m.role === "tool") {
+          const prov = !!m.provisional;
+          const slow = typeof m.elapsed === "number" && m.elapsed >= 3;
+          return (
+            <div key={m.id} className="di-settle" style={{ width: "100%", maxWidth: 520, borderRadius: 9, background: "#0f1720",
+              border: prov ? "1px dashed #2a3a49" : "1px solid var(--cc-rule)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", height: 34, boxSizing: "border-box" }}>
+                {slow
+                  ? <span style={{ flex: "0 0 auto", width: 11, height: 11, borderRadius: 999, border: "2px solid #7f8c9a", borderTopColor: "transparent", display: "block", animation: "di-spin .8s linear infinite" }} />
+                  : <Icon name="file-pen" size={13} color="#7f8c9a" />}
+                <span className="di-mono di-settle" style={{ fontSize: 11, color: prov ? "#6f8296" : "#c9d2dc", flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {m.text}{m.file ? ` · ${m.file}` : ""}
+                </span>
+                {/* The figure slot keeps its width whether or not there is a
+                    figure in it yet. */}
+                <span className="di-mono" style={{ flex: "0 0 auto", minWidth: 26, textAlign: "right", fontSize: 10, color: "#6f8296" }}>
+                  {slow ? `${m.elapsed}s` : prov ? <span className="di-shim">···</span> : ""}
+                </span>
+              </div>
             </div>
-          </div>
-        );
+          );
+        }
         // ── the system register (45c) ──
         // Two voices, split by whether the row wants something from you.
         if (m.role === "denied") return (
@@ -482,20 +524,24 @@ function FileRollup({ files, showAll, onShowAll }: { files: string[]; showAll: b
   );
 }
 
-function Composer({ onSend, suggestion }: { onSend: (t: string) => void; suggestion?: string | null }) {
-  const [text, setText] = useState("");
+function Composer({ onSend, suggestion, text, setText }: {
+  onSend: (t: string) => void; suggestion?: string | null; text: string; setText: (v: string) => void;
+}) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const send = () => { const t = text.trim(); if (!t) return; onSend(t); setText(""); if (ref.current) ref.current.style.height = "auto"; };
   return (
     <div style={{ flex: "0 0 auto", padding: "14px 20px", borderTop: "1px solid var(--cc-rule)" }}>
-      {/* The model's OWN suggested next step. One chip, offered not assumed —
-          tapping fills the composer rather than sending, so the human still
-          presses send. */}
+      {/* The model's own suggested next step, as a full-width DRAFT CARD.
+          Dashed border and a caret glyph, because it FILLS the box rather than
+          sending — the model may suggest, the human still presses send (47a). */}
       {suggestion && !text && (
         <button className="di-btn" onClick={() => { setText(suggestion); ref.current?.focus(); }}
-          style={{ display: "inline-flex", alignItems: "center", gap: 7, maxWidth: "100%", marginBottom: 9, padding: "7px 12px", border: "1px solid #2c5075", borderRadius: 999, background: "#0e2032", color: "var(--di-ink-soft)", fontSize: 11.5, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-          <Icon name="sparkles" size={11} color="var(--di-info)" style={{ flex: "0 0 auto" }} />
-          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{suggestion}</span>
+          style={{ display: "flex", alignItems: "flex-start", gap: 9, width: "100%", marginBottom: 9, padding: "10px 12px", border: "1px dashed #2c5075", borderRadius: 10, background: "transparent", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+          <Icon name="text-cursor-input" size={13} color="var(--di-info)" style={{ flex: "0 0 auto", marginTop: 1 }} />
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ display: "block", fontSize: 12, color: "var(--di-ink-soft)", lineHeight: 1.45 }}>{suggestion}</span>
+            <span style={{ display: "block", fontSize: 10.5, color: "#6f8296", marginTop: 3 }}>goes in the box — edit it, then send</span>
+          </span>
         </button>
       )}
       <div style={{ border: "1px solid #33414f", borderRadius: 12, background: "#0f1720", padding: "11px 13px", display: "flex", alignItems: "center", gap: 10 }}>
@@ -1229,6 +1275,45 @@ function SystemHappened({ text, tone, ink }: { text: string; tone: string; ink: 
       <span className="di-mono" style={{ flex: "0 0 auto", fontSize: 10, color: ink }}>{text}</span>
       <span style={{ flex: 1, height: 1, background: tone }} />
     </div>
+  );
+}
+
+/**
+ * A slash-command chip (47a).
+ *
+ * Split by WHAT PRESSING IT DOES, which is the only distinction the user needs:
+ * a command that takes no arguments SENDS (solid border, tinted fill, arrow
+ * glyph); one that takes arguments FILLS the box (dashed border, caret glyph,
+ * trailing ellipsis) so the caret lands after the command.
+ *
+ * The description is printed, never hidden behind hover — a bare `/docx` tells
+ * a user nothing and the phone has no hover.
+ */
+function CommandChip({ c, onSend, onFill }: {
+  c: { name: string; description: string; argumentHint?: string };
+  onSend: (t: string) => void;
+  onFill: (t: string) => void;
+}) {
+  const takesArgs = !!c.argumentHint;
+  const cmd = `/${c.name}`;
+  return (
+    <button className="di-btn" onClick={() => (takesArgs ? onFill(`${cmd} `) : onSend(cmd))}
+      style={{ display: "flex", alignItems: "flex-start", gap: 8, maxWidth: 260, padding: "9px 12px", borderRadius: 11, cursor: "pointer", fontFamily: "inherit", textAlign: "left",
+        border: takesArgs ? "1px dashed #2c5075" : "1px solid #24485f",
+        background: takesArgs ? "transparent" : "#0e2a26" }}>
+      <Icon name={takesArgs ? "text-cursor-input" : "arrow-up"} size={12} color="var(--di-info)" style={{ flex: "0 0 auto", marginTop: 2 }} />
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span className="di-mono" style={{ display: "block", fontSize: 11.5, color: "var(--di-ink)" }}>
+          {cmd}{takesArgs ? " …" : ""}
+        </span>
+        {c.description && (
+          <span style={{ fontSize: 10.5, color: "#6f8296", lineHeight: 1.4, marginTop: 2,
+            display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" } as React.CSSProperties}>
+            {c.description}
+          </span>
+        )}
+      </span>
+    </button>
   );
 }
 
