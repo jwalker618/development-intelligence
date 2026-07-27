@@ -6,6 +6,49 @@
 
 ---
 
+## STATUS — what has shipped (2026-07-27)
+
+Everything below in §1, §2 and the flagship §3 items marked ✅ is **built,
+verified against the real Anthropic API, and on `main`**. The tables that
+follow are kept for their rationale; read this section for current state.
+
+| # | Item | State |
+|---|---|---|
+| 1–5 | Query close, abortController, session state, double-render, Tasks crash | ✅ shipped |
+| 6 | `SDKResultMessage.usage` ledger | ✅ shipped — **and corrected**: `total_cost_usd` is cumulative, see §4 of `SDK_SPIKES.md` |
+| 7 | `SDKSystemMessage` init inventories | ✅ shipped, plus `initializationResult()` hydration — init does **not** arrive until turn one |
+| 8 | `maxBudgetUsd` | ✅ shipped, **conversation-wide** (measured), gated on `costsAreReal` |
+| 9 | `SDKPermissionDeniedMessage` | ✅ shipped — "blocked · Bash" transcript rows |
+| 10 | `SDKInformationalMessage` | ✅ shipped — hook block reasons no longer vanish |
+| 11–15 | allowedTools, disallowedTools, strictMcpConfig, bypass lock, planModeInstructions | ✅ shipped |
+| 16 | `settingSources` — the `local` decision | ✅ **decided**: omitted deliberately, stated in Settings → Diagnostics |
+| 17 | `canUseTool` full fields | ✅ shipped |
+| 18 | `permissionMode` + live setter | ✅ shipped — the leash pill |
+| 19 | `getContextUsage()` + `compact_boundary` | ✅ shipped — real context meter, compaction is a visible event |
+| 20 | `initializationResult()` | ✅ shipped |
+| 21 | Warm the query | ✅ shipped — `warm()` + `?warm=1` |
+| 22 | `accountInfo()` | ✅ shipped — and it is now the **authoritative** "Claude is connected" signal |
+| 23 | **Rewind** | ✅ **shipped** — needs our own stamped uuid; checkpoints survive resume |
+| 24 | Plan mode + ExitPlanMode card | ⛔ **mode shipped, card unscheduled** — `canUseTool` is never invoked in plan mode (measured) |
+| 25 | Task lifecycle | ✅ live "In flight" section shipped; runbook runner still unbuilt, `SAMPLE.tasks` stays true |
+| 26 | Unhandled stream kinds | ⬜ open |
+| 27 | `fallbackModel` + disclosure | ✅ shipped — `ranOn` ranked on **output** tokens only |
+| 28 | `includeHookEvents` | ✅ shipped — hook liveness chips |
+| 29 | Rate limits | ✅ shipped — `SDKRateLimitEvent` → plan-window line |
+| 30–32 | supportedCommands push, promptSuggestions, thinking config | ⬜ open (commands_changed is handled; the chips are not rebuilt from it yet) |
+| 33 | `stderr` | ✅ shipped — Diagnostics |
+| 34 | `maxTurns` | ✅ plumbed (`ChatMeta.maxTurns`), no UI yet |
+| 35–46 | Fork, session management, hooks, agents, applyFlagSettings, MCP panel, … | ⬜ open |
+
+**Spikes:** 1, 2, 3, 4, 7 and 8 are answered — see `docs/SDK_SPIKES.md`.
+5 and 6 remain unmeasured and still gate #37 and #39 respectively.
+
+Also shipped alongside, not from this roadmap: **multi-repo sessions** (a
+session holds an ordered list of checkouts; `?repo=` routes every file and git
+call; the agent gets the rest as `additionalDirectories`).
+
+---
+
 ## 0 · The placeholder ledger — what actually closes a fake surface
 
 `docs/WIRING_STATUS.md` marks exactly **four** ⚫ NO BACKEND items: caveman "% context saved" KPI (:63), RTK "+% tokens returned" (:64), Preview runtime-errors card (:95), Tasks (whole screen). Plus a set of 🟡 COSMETIC controls. Here is the honest mapping.
