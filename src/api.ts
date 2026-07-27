@@ -106,6 +106,8 @@ export interface ChatStatus {
     apiKeySource: string | null; cliVersion: string | null;
   };
   hooks: Array<{ at: number; name: string; event: string; outcome: string; exitCode: number | null }>;
+  /** Agent-initiated work in flight (subagents, background commands). */
+  tasks: LiveTask[];
   cliState: string | null;
   permissionMode: string;
   readOnly: boolean;
@@ -121,6 +123,17 @@ export interface ChatStatus {
   context: ContextUsage | null;
   account: { email?: string; organization?: string; subscriptionType?: string; apiProvider?: string } | null;
   limits: { status?: string; resetsAt?: number; rateLimitType?: string; utilization?: number } | null;
+}
+
+export interface LiveTask { id: string; label: string; status: string; detail: string | null; at: number }
+
+/** What a rewind would (or did) restore. */
+export interface RewindResult {
+  canRewind: boolean;
+  error?: string;
+  filesChanged?: string[];
+  insertions?: number;
+  deletions?: number;
 }
 
 export interface ContextUsage {
@@ -414,6 +427,12 @@ export const api = {
     req<{ readOnly: boolean }>(`/api/sessions/${id}/chat/read-only`, {
       method: "POST",
       body: JSON.stringify({ readOnly }),
+    }),
+  /** Preview by default; only `dryRun: false` touches the disk. */
+  rewind: (id: string, uuid: string, dryRun = true) =>
+    req<RewindResult>(`/api/sessions/${id}/chat/rewind`, {
+      method: "POST",
+      body: JSON.stringify({ uuid, dryRun }),
     }),
   setBudget: (id: string, budgetUsd: number | null) =>
     req<{ budgetUsd: number | null }>(`/api/sessions/${id}/chat/budget`, {

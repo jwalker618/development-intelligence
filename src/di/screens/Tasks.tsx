@@ -3,9 +3,40 @@ import { Icon, RailTitle } from "../primitives";
 import { RailDock, MainColumn } from "../Shell";
 import { SampleChip } from "./Session";
 import type { SAMPLE } from "../control";
+import type { LiveTask } from "../control";
 import type { SessionState, TaskManifest, TaskParam } from "../state";
 
-export function TasksScreen({ s, sample }: { s: SessionState; sample: typeof SAMPLE }) {
+/** What the agent is doing right now. Nothing renders when nothing is running,
+ *  so this never competes with the palette for attention. */
+function InFlight({ live }: { live: LiveTask[] }) {
+  if (!live.length) return null;
+  const done = (t: LiveTask) => /complete|done|finish/i.test(t.status);
+  const failed = (t: LiveTask) => /fail|error|cancel/i.test(t.status);
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div className="di-eyebrow" style={{ marginBottom: 8, fontSize: 9, color: "var(--di-rail-hue)" }}>
+        In flight · {live.filter((t) => !done(t) && !failed(t)).length} running
+      </div>
+      {live.slice(-8).reverse().map((t) => {
+        const tone = failed(t) ? "var(--di-neg)" : done(t) ? "var(--di-pos)" : "var(--di-rail-hue)";
+        return (
+          <div key={t.id} style={{ display: "flex", alignItems: "flex-start", gap: 9, padding: "8px 10px", border: "1px solid var(--di-rail-row-border)", borderRadius: 9, background: "var(--di-rail-row-bg)", marginBottom: 5 }}>
+            <span style={{ width: 7, height: 7, flex: "0 0 auto", marginTop: 4, borderRadius: 999, background: tone,
+              animation: done(t) || failed(t) ? undefined : "di-pulse 1.6s infinite" }} />
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: "block", fontSize: 11.5, color: "var(--di-ink)", lineHeight: 1.4 }}>{t.label}</span>
+              <span className="di-mono" style={{ display: "block", fontSize: 9.5, color: "#6f8296", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {t.detail ?? t.status}
+              </span>
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function TasksScreen({ s, sample, live }: { s: SessionState; sample: typeof SAMPLE; live: LiveTask[] }) {
   // s.tasks is empty the moment this is driven by a live list — indexing [0]
   // and the non-null find() both crashed the screen.
   const [selectedId, setSelectedId] = useState<string | null>(s.tasks[0]?.id ?? null);
@@ -26,6 +57,10 @@ export function TasksScreen({ s, sample }: { s: SessionState; sample: typeof SAM
           <span style={{ fontSize: 11.5, color: "#6f8296", flex: 1 }}>Search tasks…</span>
           <span className="di-mono" style={{ fontSize: 10, color: "#6f8296" }}>⌘K</span>
         </div>
+        {/* LIVE — a distinct section above the seeded palette. These are the
+            agent's own subagents and background commands, not the runbooks
+            below; the palette stays honestly labelled as sample. */}
+        <InFlight live={live} />
       </div>
 
       <div className="di-scroll" style={{ position: "absolute", top: 124, left: 0, width: 340, bottom: 56, boxSizing: "border-box", padding: "0 14px", zIndex: 5 }}>

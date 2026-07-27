@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type ChatStatus, type ModelRow, type RepoRef, type SearchHit, type SessionInfo, type UsageSummary } from "../api";
+import { api, type ChatStatus, type ModelRow, type RewindResult, type RepoRef, type SearchHit, type SessionInfo, type UsageSummary } from "../api";
 import {
   SAMPLE, buildTree, changeKey, mapSpanDiff, parseDiff, setCavemanMode, subscribeChat, toChanges, toDialMode, toTimeline,
   type ChatMsg, type ChatState, type Move, type TreeNode,
@@ -50,6 +50,10 @@ export interface Actions {
   setReadOnly: (on: boolean) => void;
   setBudget: (usd: number | null) => void;
   refreshStatus: () => void;
+  /** Preview what a rewind would restore. Never touches the disk. */
+  previewRewind: (uuid: string) => Promise<RewindResult>;
+  /** Actually restore. Only call after the user confirms a preview. */
+  rewind: (uuid: string) => Promise<RewindResult>;
   addPin: (icon: string, label: string) => void;
   removePin: (id: string) => void;
   search: (q: string) => Promise<SearchHit[]>;
@@ -65,7 +69,7 @@ export function useControl(sessionId: string | null): Live {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [chat, setChat] = useState<ChatState>({
     messages: [], busy: false, model: null, activeModel: null, effort: null, pendingApprovalId: null,
-    permissionMode: "default", readOnly: false, budgetUsd: null, signals: null, hooks: [], limits: null,
+    permissionMode: "default", readOnly: false, budgetUsd: null, signals: null, hooks: [], limits: null, tasks: [],
   });
   const [trees, setTrees] = useState<TreeNode[]>([]);
   const [repos, setRepos] = useState<RepoRef[]>([]);
@@ -177,6 +181,7 @@ export function useControl(sessionId: string | null): Live {
           signals: st.signals,
           hooks: st.hooks as ChatState["hooks"],
           limits: st.limits,
+          tasks: st.tasks ?? [],
         }));
       }
     } catch { if (statusFor.current === id) setStatus(null); }
@@ -300,6 +305,16 @@ export function useControl(sessionId: string | null): Live {
       void api.setBudget(sessionId, usd).then(() => loadStatus(sessionId)).catch(guard);
     },
     refreshStatus: () => { void loadStatus(sessionId, true); },
+    previewRewind: (uuid) => sessionId
+      ? api.rewind(sessionId, uuid, true).catch((e) => ({ canRewind: false, error: e instanceof Error ? e.message : String(e) }))
+      : Promise.resolve({ canRewind: false, error: "no session" }),
+    rewind: (uuid) => sessionId
+      ? api.rewind(sessionId, uuid, false)
+          // The files move but the transcript does not, so the Changes screen
+          // is now stale — reload it rather than leaving a phantom diff.
+          .then(async (r) => { await loadSession(sessionId); return r; })
+          .catch((e) => ({ canRewind: false, error: e instanceof Error ? e.message : String(e) }))
+      : Promise.resolve({ canRewind: false, error: "no session" }),
     refresh: () => { if (sessionId) void loadSession(sessionId); },
   };
 

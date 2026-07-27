@@ -26,7 +26,13 @@ export interface TurnUsage {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreateTokens: number;
+  /** THIS turn's cost. Derived, not reported — see `cumulativeCostUsd`. */
   costUsd: number;
+  /** `total_cost_usd` verbatim. MEASURED: this field accumulates across the
+   *  conversation (0.028 → 0.037 → 0.047 …), it is not a per-turn figure.
+   *  Kept so the delta can be recomputed and so a ledger written by an older
+   *  build stays interpretable. */
+  cumulativeCostUsd: number;
   durationMs: number;
   contextWindow: number;
   /** true when the turn ended in error — excluded from averages. */
@@ -76,9 +82,23 @@ export class UsageLedger {
     return path.join(this.dir, `${sessionId}.jsonl`);
   }
 
+  /**
+   * Append one turn, converting the CLI's cumulative cost into this turn's own.
+   *
+   * Summing `total_cost_usd` per turn overstates a session by roughly the
+   * number of turns — four turns costing $0.056 in total reported $0.168.
+   * The delta is against the previous turn's cumulative figure; when the CLI
+   * process restarts (a recycle, a redeploy) its accumulator resets, so a
+   * cumulative LOWER than the previous one is taken at face value rather than
+   * clamped to a negative.
+   */
   record(sessionId: string, turn: TurnUsage): void {
     try {
-      fs.appendFileSync(this.file(sessionId), JSON.stringify(turn) + "\n");
+      const prev = this.list(sessionId).at(-1);
+      const prevCum = prev ? n(prev.cumulativeCostUsd) : 0;
+      const cum = n(turn.cumulativeCostUsd);
+      const costUsd = cum >= prevCum ? cum - prevCum : cum;
+      fs.appendFileSync(this.file(sessionId), JSON.stringify({ ...turn, costUsd }) + "\n");
     } catch {
       /* metrics must never break a turn */
     }
@@ -194,7 +214,10 @@ export function turnFromResult(
     outputTokens: output,
     cacheReadTokens: cacheRead,
     cacheCreateTokens: cacheCreate,
+    // Both fields carry the CUMULATIVE figure here; UsageLedger.record turns
+    // it into this turn's own cost.
     costUsd: n(msg.total_cost_usd),
+    cumulativeCostUsd: n(msg.total_cost_usd),
     durationMs: n(msg.duration_ms),
     contextWindow: ctx,
     error: msg.subtype !== "success",

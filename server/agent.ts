@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -8,6 +9,7 @@ import {
   type PermissionMode,
   type PermissionUpdate,
   type Query,
+  type RewindFilesResult,
   type SDKSystemMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -35,6 +37,7 @@ export type ChatEventKind =
   | "denied" // auto-denied without asking us {toolName, why, message}
   | "notice" // banner from the loop: hook block reason, status line {text, level}
   | "compacted" // context was compacted {trigger, preTokens, postTokens}
+  | "rewound" // files restored to a previous turn {uuid, files, insertions, deletions}
   | "result" // turn finished {ok, costUsd, durationMs}
   | "error"; // {message}
 
@@ -108,6 +111,16 @@ export interface SessionSignals {
   permissionMode: string | null;
   apiKeySource: string | null;
   cliVersion: string | null;
+}
+
+/** An agent-initiated task in flight (a subagent, a background command).
+ *  Live only — never persisted, so ⌘K is not flooded with progress ticks. */
+export interface LiveTask {
+  id: string;
+  label: string;
+  status: string;
+  detail: string | null;
+  at: number;
 }
 
 /** One settings-file hook execution. The honest answer to "did caveman fire on
@@ -213,6 +226,8 @@ export class AgentChat {
   private signals: SessionSignals = emptySignals();
   /** Bounded ring of settings-file hook results — caveman/RTK liveness. */
   private hookRuns: HookRun[] = [];
+  /** Agent-initiated tasks currently known to the CLI. */
+  private tasks = new Map<string, LiveTask>();
   /** The CLI's own idea of what it is doing. When present it OUTRANKS our
    *  inference: six inference sites is how stuck spinners happen. */
   private cliState: "idle" | "running" | "requires_action" | null = null;
@@ -322,6 +337,7 @@ export class AgentChat {
         pendingApproval: this.pending ? this.lastApprovalEvent() : null,
         signals: this.signals,
         hooks: this.hookRuns,
+        tasks: [...this.tasks.values()],
       }),
     );
     ws.on("close", () => this.clients.delete(ws));
@@ -354,12 +370,18 @@ export class AgentChat {
   }
 
   send(text: string): void {
-    this.emit("user", { text });
+    // MEASURED: the CLI never echoes the user's own text message back, so the
+    // only rewind anchor is one we stamp ourselves. Without it every
+    // rewindFiles() call answers "No file checkpoint found for this message."
+    // See docs/SDK_SPIKES.md §1.
+    const uuid = crypto.randomUUID();
+    this.emit("user", { text, uuid });
     const msg: SDKUserMessage = {
       type: "user",
       message: { role: "user", content: [{ type: "text", text }] },
       parent_tool_use_id: null,
-    };
+      uuid,
+    } as SDKUserMessage;
     this.ensureRunning();
     const waiter = this.inputWaiters.shift();
     if (waiter) waiter(msg);
@@ -606,6 +628,20 @@ export class AgentChat {
         break;
       }
 
+      // Agent-initiated work (subagents, background bash). MEASURED as emitted
+      // unconditionally — see docs/SDK_SPIKES.md §7. Live-only: this is a
+      // "what is happening right now" panel, not transcript history, and
+      // persisting every progress tick would flood ⌘K.
+      case "task_started":
+      case "task_progress":
+      case "task_updated":
+      case "task_notification":
+      case "background_tasks_changed": {
+        this.applyTask(msg);
+        this.broadcast({ t: "tasks", tasks: [...this.tasks.values()] });
+        break;
+      }
+
       // A mid-session push of the command list (skills discovered as the agent
       // moves around). The docs are explicit: REPLACE, don't merge.
       case "commands_changed": {
@@ -622,9 +658,56 @@ export class AgentChat {
     }
   }
 
+  /**
+   * Fold one task lifecycle message into the live task table.
+   *
+   * The CLI's field names differ per subtype and are not a tidy union, so this
+   * reads defensively and keeps whatever it can identify. An unnameable task
+   * is skipped rather than shown as "undefined".
+   */
+  private applyTask(msg: Record<string, unknown>): void {
+    const m = msg as {
+      subtype?: string; task_id?: string; id?: string; taskId?: string;
+      description?: string; prompt?: string; status?: string; message?: string;
+      tasks?: Array<Record<string, unknown>>;
+    };
+    // background_tasks_changed carries the whole list — treat it as truth.
+    if (Array.isArray(m.tasks)) {
+      this.tasks.clear();
+      for (const t of m.tasks) {
+        const id = String(t.task_id ?? t.id ?? "");
+        if (!id) continue;
+        this.tasks.set(id, {
+          id,
+          label: String(t.description ?? t.prompt ?? "task").slice(0, 140),
+          status: String(t.status ?? "running"),
+          detail: null,
+          at: Date.now(),
+        });
+      }
+      return;
+    }
+    const id = String(m.task_id ?? m.taskId ?? m.id ?? "");
+    if (!id) return;
+    const prev = this.tasks.get(id);
+    const done = m.subtype === "task_updated" && /complete|done|finish|fail/i.test(String(m.status ?? ""));
+    this.tasks.set(id, {
+      id,
+      label: String(m.description ?? m.prompt ?? prev?.label ?? "task").slice(0, 140),
+      status: String(m.status ?? (done ? "done" : prev?.status ?? "running")),
+      detail: m.message ? String(m.message).slice(0, 200) : prev?.detail ?? null,
+      at: Date.now(),
+    });
+    // Keep the table bounded; a long session can dispatch many subagents.
+    if (this.tasks.size > 40) {
+      const oldest = [...this.tasks.values()].sort((a, b) => a.at - b.at)[0];
+      if (oldest) this.tasks.delete(oldest.id);
+    }
+  }
+
   /** Live CLI inventories + hook liveness, for the client and the API. */
-  status(): { signals: SessionSignals; hooks: HookRun[]; cliState: string | null } {
-    return { signals: this.signals, hooks: this.hookRuns, cliState: this.cliState };
+  status(): { signals: SessionSignals; hooks: HookRun[]; cliState: string | null; tasks: LiveTask[] } {
+    return { signals: this.signals, hooks: this.hookRuns, cliState: this.cliState, tasks: [...this.tasks.values()] };
   }
 
   /**
@@ -724,6 +807,55 @@ export class AgentChat {
   }
 
   /**
+   * Undo everything the agent changed on disk since a given user message.
+   *
+   * DI's one real undo. `dryRun` answers "what would this restore?" so the
+   * reviewer confirms against a file count and a line delta rather than a
+   * promise. Measured to survive a query recycle and `resume` — see
+   * docs/SDK_SPIKES.md §2.
+   *
+   * Deliberately NOT wired to per-hunk Revert: this reverts every file the
+   * agent touched since that message, so a button labelled "Revert" on one
+   * hunk row would silently discard the reviewer's other same-turn edits.
+   *
+   * The transcript does NOT rewind with the files — there is no counterpart in
+   * the SDK — so a real rewind leaves a durable marker saying exactly that.
+   */
+  async rewind(uuid: string, dryRun: boolean): Promise<RewindFilesResult> {
+    if (!this.q) {
+      // A cold session has no CLI process; warm it so the checkpoint store is
+      // reachable, rather than reporting "cannot rewind" for something we can.
+      this.warm();
+    }
+    if (!this.q) return { canRewind: false, error: "Claude Code is not running" } as RewindFilesResult;
+    const call = (dry: boolean) =>
+      this.q!.rewindFiles(uuid, { dryRun: dry }).catch((e: unknown) => ({
+        canRewind: false,
+        error: e instanceof Error ? e.message : String(e),
+      }) as RewindFilesResult);
+
+    if (dryRun) return call(true);
+
+    // MEASURED: the real rewind's response carries only `skippedLinks` — no
+    // file list, no line counts. Taking the stats from it produced a receipt
+    // that read "0 files restored · +0 −0" for a rewind that restored a file.
+    // A dry run immediately beforehand is one cheap control request and makes
+    // the receipt true.
+    const preview = await call(true);
+    const res = await call(false);
+    if (res.canRewind) {
+      this.emit("rewound", {
+        uuid,
+        files: preview.filesChanged?.length ?? 0,
+        insertions: preview.insertions ?? 0,
+        deletions: preview.deletions ?? 0,
+      });
+    }
+    // Hand the caller the stats too, so the client never has to guess either.
+    return { ...preview, ...res } as RewindFilesResult;
+  }
+
+  /**
    * Hard spend ceiling. Creation-time, so an idle query is recycled. A breached
    * session re-breaches on the very next message with the same cap, which is
    * why the client's stop card offers "raise budget" rather than only "resume".
@@ -795,6 +927,8 @@ export class AgentChat {
         planModeInstructions: PLAN_INSTRUCTIONS,
         ...(this.meta.maxTurns ? { maxTurns: this.meta.maxTurns } : {}),
         ...(this.meta.budgetUsd ? { maxBudgetUsd: this.meta.budgetUsd } : {}),
+        // Undo over agent edits. Anchored to the uuid we stamp in send().
+        enableFileCheckpointing: true,
         // Degrade instead of failing the turn — but the reviewer is TOLD which
         // model actually ran (see `ranOn` on the result event). Under-reviewing
         // Sonnet output believing it came from Opus is a review-integrity bug,

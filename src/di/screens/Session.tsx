@@ -3,7 +3,7 @@ import { Icon, RailTitle } from "../primitives";
 import { RailScroll, RailDock, MainColumn } from "../Shell";
 import type { ChatMsg, ChatState } from "../control";
 import type { SAMPLE } from "../control";
-import type { ChatStatus, ModelRow, SearchHit, UsageSummary } from "../../api";
+import type { ChatStatus, ModelRow, RewindResult, SearchHit, UsageSummary } from "../../api";
 import type { CavemanMode, SessionState } from "../state";
 
 const MODES: CavemanMode[] = ["off", "lite", "full", "ultra"];
@@ -30,7 +30,7 @@ function activeRow(rows: ModelRow[] | null, model: string | null, active: string
 }
 
 export function SessionScreen({
-  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, usage, status, onModel, onEffort, onRefreshModels, onPermissionMode, onReadOnly, onBudget, onAddPin, onRemovePin, onSearch,
+  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, usage, status, onModel, onEffort, onRefreshModels, onPermissionMode, onReadOnly, onBudget, onPreviewRewind, onRewind, onAddPin, onRemovePin, onSearch,
 }: {
   s: SessionState;
   chat: ChatState;
@@ -51,6 +51,8 @@ export function SessionScreen({
   onPermissionMode: (mode: string) => void;
   onReadOnly: (on: boolean) => void;
   onBudget: (usd: number | null) => void;
+  onPreviewRewind: (uuid: string) => Promise<RewindResult>;
+  onRewind: (uuid: string) => Promise<RewindResult>;
   onAddPin: (icon: string, label: string) => void;
   onRemovePin: (id: string) => void;
   onSearch: (q: string) => Promise<SearchHit[]>;
@@ -218,7 +220,7 @@ export function SessionScreen({
 
         {claudeConnected === false
           ? <NotConnected onConnect={onConnect} />
-          : <ChatBody chat={chat} onApproval={onApproval} onSend={onSend} />}
+          : <ChatBody chat={chat} onApproval={onApproval} onSend={onSend} onPreviewRewind={onPreviewRewind} onRewind={onRewind} />}
 
         {claudeConnected !== false && chat.messages.length > 0 && <Composer onSend={onSend} />}
       </MainColumn>
@@ -241,7 +243,13 @@ function NotConnected({ onConnect }: { onConnect: () => void }) {
 
 const SUGGESTIONS = ["Explain this repo", "Add a failing test", "Fix the pending filter"];
 
-function ChatBody({ chat, onApproval, onSend }: { chat: ChatState; onApproval: (id: string, d: "allow" | "always" | "deny" | "stop", input?: Record<string, unknown>) => void; onSend: (t: string) => void }) {
+function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind }: {
+  chat: ChatState;
+  onApproval: (id: string, d: "allow" | "always" | "deny" | "stop", input?: Record<string, unknown>) => void;
+  onSend: (t: string) => void;
+  onPreviewRewind: (uuid: string) => Promise<RewindResult>;
+  onRewind: (uuid: string) => Promise<RewindResult>;
+}) {
   if (chat.messages.length === 0) {
     return (
       <>
@@ -265,7 +273,7 @@ function ChatBody({ chat, onApproval, onSend }: { chat: ChatState; onApproval: (
     <div className="di-scroll" style={{ flex: 1, padding: "18px 22px", display: "flex", flexDirection: "column", gap: 13 }}>
       {chat.messages.map((m) => {
         if (m.role === "user") return (
-          <div key={m.id} style={{ alignSelf: "flex-end", maxWidth: "70%", background: "#1c2836", border: "1px solid #2a3a49", borderRadius: "12px 12px 4px 12px", padding: "10px 13px", fontSize: 12.5, lineHeight: 1.5, color: "#dbe3ec", whiteSpace: "pre-wrap" }}>{m.text}</div>
+          <UserBubble key={m.id} m={m} onPreviewRewind={onPreviewRewind} onRewind={onRewind} />
         );
         if (m.role === "agent") return (
           <div key={m.id} style={{ maxWidth: "86%", fontSize: 12.5, lineHeight: 1.6, color: "#aeb9c5", whiteSpace: "pre-wrap" }}>{m.text}</div>
@@ -303,6 +311,14 @@ function ChatBody({ chat, onApproval, onSend }: { chat: ChatState; onApproval: (
             </div>
           );
         }
+        // A receipt for an undo that actually happened.
+        if (m.role === "rewound") return (
+          <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "2px 0" }}>
+            <span style={{ flex: 1, height: 1, background: "#3a2a1a" }} />
+            <span className="di-mono" style={{ fontSize: 10, color: "var(--di-warn)" }}>{m.text}</span>
+            <span style={{ flex: 1, height: 1, background: "#3a2a1a" }} />
+          </div>
+        );
         // Compaction silently changes what the agent remembers. Mark it.
         if (m.role === "compacted") return (
           <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "2px 0" }}>
@@ -315,6 +331,90 @@ function ChatBody({ chat, onApproval, onSend }: { chat: ChatState; onApproval: (
         const pending = chat.pendingApprovalId === m.approvalId;
         return <ApprovalCard key={m.id} m={m} pending={pending} onApproval={onApproval} />;
       })}
+    </div>
+  );
+}
+
+/**
+ * A user message, with the one undo DI has.
+ *
+ * "Rewind here" restores every file the agent changed SINCE this message. It
+ * is a two-step: a dry run reports the file count and line delta, and only
+ * then does the confirm touch disk — the same shape as the typed-challenge
+ * gate elsewhere, scaled to the blast radius.
+ *
+ * The transcript does NOT rewind with the files. There is no counterpart in
+ * the SDK, so the card says so rather than implying the conversation moved.
+ */
+function UserBubble({ m, onPreviewRewind, onRewind }: {
+  m: ChatMsg;
+  onPreviewRewind: (uuid: string) => Promise<RewindResult>;
+  onRewind: (uuid: string) => Promise<RewindResult>;
+}) {
+  const [preview, setPreview] = useState<RewindResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const ask = () => {
+    if (!m.uuid) return;
+    setBusy(true);
+    void onPreviewRewind(m.uuid).then(setPreview).finally(() => setBusy(false));
+  };
+  const confirm = () => {
+    if (!m.uuid) return;
+    setBusy(true);
+    void onRewind(m.uuid)
+      .then((r) => { setPreview(r.canRewind ? null : r); setDone(r.canRewind); })
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div style={{ alignSelf: "flex-end", maxWidth: "70%", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
+      <div style={{ background: "#1c2836", border: "1px solid #2a3a49", borderRadius: "12px 12px 4px 12px", padding: "10px 13px", fontSize: 12.5, lineHeight: 1.5, color: "#dbe3ec", whiteSpace: "pre-wrap" }}>{m.text}</div>
+
+      {/* Only messages we stamped can be rewound to — older transcripts have
+          no anchor, and offering a dead button would be worse than none. */}
+      {m.uuid && !done && !preview && (
+        <button className="di-btn" onClick={ask} disabled={busy}
+          style={{ border: 0, background: "transparent", color: "#586573", fontFamily: "inherit", fontSize: 10.5, cursor: "pointer", padding: "0 2px" }}>
+          {busy ? "checking…" : "↩ rewind here"}
+        </button>
+      )}
+
+      {preview && (
+        <div style={{ width: 280, border: `1px solid ${preview.canRewind ? "#5a3316" : "#3a4653"}`, borderRadius: 10, background: preview.canRewind ? "#1a1206" : "#141d26", padding: "10px 12px" }}>
+          {preview.canRewind ? (
+            <>
+              <div style={{ fontSize: 11.5, color: "#e8c9a0", lineHeight: 1.5, marginBottom: 8 }}>
+                Restores <b>{preview.filesChanged?.length ?? 0}</b> file{(preview.filesChanged?.length ?? 0) === 1 ? "" : "s"}
+                {" "}(<span style={{ color: "var(--di-pos)" }}>+{preview.insertions ?? 0}</span>{" "}
+                <span style={{ color: "var(--di-neg)" }}>−{preview.deletions ?? 0}</span>) to their state before this message.
+                The conversation stays as it is — only files move.
+              </div>
+              {!!preview.filesChanged?.length && (
+                <div className="di-mono" style={{ fontSize: 9.5, color: "#a08a5e", lineHeight: 1.6, marginBottom: 9, maxHeight: 60, overflowY: "auto" }}>
+                  {preview.filesChanged.slice(0, 6).map((f) => <div key={f}>{f.split("/").slice(-2).join("/")}</div>)}
+                  {preview.filesChanged.length > 6 && <div>… {preview.filesChanged.length - 6} more</div>}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 6 }}>
+                <button className="di-btn" onClick={() => setPreview(null)}
+                  style={{ flex: 1, height: 30, border: "1px solid var(--di-rule)", borderRadius: 8, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 11.5, cursor: "pointer" }}>Cancel</button>
+                <button className="di-btn" onClick={confirm} disabled={busy}
+                  style={{ flex: 1, height: 30, border: 0, borderRadius: 8, background: "var(--di-warn)", color: "#1a1206", fontFamily: "inherit", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
+                  {busy ? "Restoring…" : "Restore files"}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 11, color: "#8fa6b5", lineHeight: 1.5 }}>
+              Can't rewind to here — {preview.error ?? "no checkpoint"}.
+              <button className="di-btn" onClick={() => setPreview(null)}
+                style={{ marginLeft: 6, border: 0, background: "transparent", color: "var(--di-info)", fontFamily: "inherit", fontSize: 11, cursor: "pointer", padding: 0 }}>dismiss</button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

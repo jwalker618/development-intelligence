@@ -397,6 +397,20 @@ router.on("POST", "/api/sessions/:id/chat/budget", async ({ params, body }) => {
   return { ok: true, budgetUsd: usd ?? null };
 });
 
+/**
+ * Undo the agent's file changes back to a user message.
+ *
+ * `dryRun` (the default) is a preview: it reports the file count and line
+ * delta so the reviewer confirms against numbers, not a promise. Only an
+ * explicit `dryRun: false` touches the disk.
+ */
+router.on("POST", "/api/sessions/:id/chat/rewind", async ({ params, body }) => {
+  const b = (body ?? {}) as { uuid?: string; dryRun?: boolean };
+  if (!b.uuid || !/^[0-9a-f-]{36}$/i.test(b.uuid)) throw new HttpError(400, "uuid is required");
+  const s = manager.get(params.id);
+  return chats.get(s).rewind(b.uuid, b.dryRun !== false);
+});
+
 // ── what the CLI is telling us about itself ─────────────────────────────────
 
 /**
