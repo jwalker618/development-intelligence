@@ -7,7 +7,7 @@ import {
   Search, Settings, ShieldAlert, Signal, Smartphone, SquareArrowOutDownRight, SquareTerminal, Tablet,
   Terminal, Upload, Wifi, X,
   Sparkles, Download, Save, MousePointerClick, MonitorOff, CheckCheck, FileImage, Image, File, FolderOpen,
-  Pause, Square, Flame, MinusCircle, User, Shield, Copy, Link, type LucideIcon,
+  Pause, Square, Flame, MinusCircle, User, Shield, ShieldOff, Info, Copy, Link, type LucideIcon,
 } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 
@@ -33,6 +33,7 @@ const ICONS: Record<string, LucideIcon> = {
   "monitor-off": MonitorOff, "check-check": CheckCheck, "file-image": FileImage, image: Image,
   file: File, "folder-open": FolderOpen, pause: Pause, square: Square, flame: Flame, "minus-circle": MinusCircle,
   user: User, shield: Shield, copy: Copy, link: Link,
+  "shield-off": ShieldOff, info: Info,
 };
 
 /** Lucide icon by kebab-case name (the design references names verbatim). */

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type ModelRow, type RepoRef, type SearchHit, type SessionInfo, type UsageSummary } from "../api";
+import { api, type ChatStatus, type ModelRow, type RepoRef, type SearchHit, type SessionInfo, type UsageSummary } from "../api";
 import {
   SAMPLE, buildTree, changeKey, mapSpanDiff, parseDiff, setCavemanMode, subscribeChat, toChanges, toDialMode, toTimeline,
   type ChatMsg, type ChatState, type Move, type TreeNode,
@@ -22,6 +22,9 @@ export interface Live {
   repos: RepoRef[];
   activeDiff: { path: string; repo?: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null;
   cavemanSavings: string | null;
+  /** The CLI's own view of this session: context meter, account, inventories.
+   *  Null until the first status read lands. */
+  status: ChatStatus | null;
   sample: typeof SAMPLE;
   conn: Conn;
   error: string | null;
@@ -43,6 +46,10 @@ export interface Actions {
   setModel: (model: string) => void;
   setEffort: (effort: string | null) => void;
   refreshModels: () => void;
+  setPermissionMode: (mode: string) => void;
+  setReadOnly: (on: boolean) => void;
+  setBudget: (usd: number | null) => void;
+  refreshStatus: () => void;
   addPin: (icon: string, label: string) => void;
   removePin: (id: string) => void;
   search: (q: string) => Promise<SearchHit[]>;
@@ -56,13 +63,18 @@ const is401 = (e: unknown) => e instanceof Error && /\b401\b/.test(e.message);
 export function useControl(sessionId: string | null): Live {
   const [state, setState] = useState<SessionState>(seedState);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [chat, setChat] = useState<ChatState>({ messages: [], busy: false, model: null, activeModel: null, effort: null, pendingApprovalId: null });
+  const [chat, setChat] = useState<ChatState>({
+    messages: [], busy: false, model: null, activeModel: null, effort: null, pendingApprovalId: null,
+    permissionMode: "default", readOnly: false, budgetUsd: null, signals: null, hooks: [], limits: null,
+  });
   const [trees, setTrees] = useState<TreeNode[]>([]);
   const [repos, setRepos] = useState<RepoRef[]>([]);
   const [activeDiff, setActiveDiff] = useState<{ path: string; repo?: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null>(null);
   const [cavemanSavings, setCavemanSavings] = useState<string | null>(null);
   const [models, setModels] = useState<ModelRow[] | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const [status, setStatus] = useState<ChatStatus | null>(null);
+  const statusFor = useRef<string | null>(null);
   const modelsFor = useRef<string | null>(null);
   const [conn, setConn] = useState<Conn>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -127,6 +139,7 @@ export function useControl(sessionId: string | null): Live {
         onEvent: (ev) => setChat((c) => reconcile(c, ev)),
         onDelta: (text) => setChat((c) => appendDelta(c, text)),
         onUsage: (u) => setUsage(u),
+        onHook: (run) => setChat((c) => ({ ...c, hooks: [...c.hooks, run].slice(-40) })),
         onConn: (cc) => setConn(cc),
       });
     })();
@@ -146,6 +159,38 @@ export function useControl(sessionId: string | null): Live {
   }, []);
 
   useEffect(() => { void loadModels(sessionId); }, [sessionId, loadModels]);
+
+  // The CLI's own view of the session. `warm` starts the process so the context
+  // meter and account are populated before the user's first message, not after.
+  const loadStatus = useCallback(async (id: string | null, warm = false) => {
+    statusFor.current = id;
+    if (!id) { setStatus(null); return; }
+    try {
+      const st = await api.chatStatus(id, warm);
+      if (statusFor.current === id) {
+        setStatus(st);
+        setChat((c) => ({
+          ...c,
+          permissionMode: st.permissionMode,
+          readOnly: st.readOnly,
+          budgetUsd: st.budgetUsd,
+          signals: st.signals,
+          hooks: st.hooks as ChatState["hooks"],
+          limits: st.limits,
+        }));
+      }
+    } catch { if (statusFor.current === id) setStatus(null); }
+  }, []);
+
+  useEffect(() => { void loadStatus(sessionId, true); }, [sessionId, loadStatus]);
+
+  // Refresh the context meter after each turn — it only moves when the agent
+  // has said something, so this is cheaper and truer than polling on a timer.
+  useEffect(() => {
+    if (!sessionId || chat.busy) return;
+    const t = setTimeout(() => void loadStatus(sessionId), 800);
+    return () => clearTimeout(t);
+  }, [sessionId, chat.busy, loadStatus]);
 
   // Mirror the caveman flag on a ~15s poll.
   useEffect(() => {
@@ -239,10 +284,26 @@ export function useControl(sessionId: string | null): Live {
     },
     search: (q) => sessionId ? api.searchTranscript(sessionId, q).then((r) => r.hits).catch(() => []) : Promise.resolve([]),
     refreshModels: () => { void loadModels(sessionId, true); },
+    setPermissionMode: (mode) => {
+      if (!sessionId) return;
+      setChat((c) => ({ ...c, permissionMode: mode }));
+      void api.setPermissionMode(sessionId, mode).then(() => loadStatus(sessionId)).catch(guard);
+    },
+    setReadOnly: (on) => {
+      if (!sessionId) return;
+      setChat((c) => ({ ...c, readOnly: on }));
+      void api.setReadOnly(sessionId, on).then(() => loadStatus(sessionId)).catch(guard);
+    },
+    setBudget: (usd) => {
+      if (!sessionId) return;
+      setChat((c) => ({ ...c, budgetUsd: usd }));
+      void api.setBudget(sessionId, usd).then(() => loadStatus(sessionId)).catch(guard);
+    },
+    refreshStatus: () => { void loadStatus(sessionId, true); },
     refresh: () => { if (sessionId) void loadSession(sessionId); },
   };
 
-  return { state, sessions, chat, models, usage, trees, tree: trees[0] ?? null, repos, activeDiff, cavemanSavings, sample: SAMPLE, conn, error, actions };
+  return { state, sessions, chat, models, usage, trees, tree: trees[0] ?? null, repos, activeDiff, cavemanSavings, status, sample: SAMPLE, conn, error, actions };
 }
 
 function foldOne(ev: { kind?: string; [k: string]: unknown }): ChatMsg[] {

@@ -687,11 +687,26 @@ export class AgentChat {
    * user has no way to reconcile with their bill.
    */
   costsAreReal(): boolean {
-    const provider = this.accountCache?.apiProvider;
-    const sub = this.accountCache?.subscriptionType;
-    if (provider && provider !== "firstParty") return false;
-    // A subscription of any kind means the cost is notional.
-    return !sub;
+    const acct = this.accountCache;
+    // No account yet — say no rather than showing a ceiling we may have to
+    // withdraw a second later.
+    if (!acct) return false;
+    if (acct.apiProvider && acct.apiProvider !== "firstParty") return false;
+    if (acct.subscriptionType) return false;
+    // An OAuth credential IS a subscription login even when the CLI does not
+    // name the plan: measured live, a working Max session reports only
+    // `tokenSource: CLAUDE_CODE_OAUTH_TOKEN_*` with no subscriptionType, and
+    // treating the missing field as "billed per token" put a dollar ceiling on
+    // a session whose dollars are notional.
+    const source = String(acct.tokenSource ?? "");
+    if (/oauth/i.test(source)) return false;
+    return true;
+  }
+
+  /** Has the CLI actually authenticated? The stored-token check the front door
+   *  uses is a proxy; this is the fact. */
+  authenticated(): boolean {
+    return this.accountCache !== null;
   }
 
   /** Plan rate-limit window, when the CLI has pushed one. */

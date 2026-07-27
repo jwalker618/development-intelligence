@@ -421,6 +421,7 @@ router.on("GET", "/api/sessions/:id/chat/status", async ({ params, query }) => {
     readOnly: chat.readOnly,
     budgetUsd: chat.budgetUsd,
     costsAreReal: chat.costsAreReal(),
+    authenticated: chat.authenticated(),
     context,
     account,
     limits: chat.limits(),

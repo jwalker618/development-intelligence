@@ -96,6 +96,51 @@ export interface ModelCatalog {
 }
 
 /** Semantic span-diff (server/spandiff.ts): token-level inline ops + move blocks. */
+/** Everything the CLI can tell us about the session it is running. */
+export interface ChatStatus {
+  signals: {
+    commands: string[]; skills: string[]; agents: string[]; tools: string[];
+    plugins: Array<{ name: string; version?: string }>;
+    mcpServers: Array<{ name: string; status: string }>;
+    betas: string[]; outputStyle: string | null; permissionMode: string | null;
+    apiKeySource: string | null; cliVersion: string | null;
+  };
+  hooks: Array<{ at: number; name: string; event: string; outcome: string; exitCode: number | null }>;
+  cliState: string | null;
+  permissionMode: string;
+  readOnly: boolean;
+  budgetUsd: number | null;
+  /** False on subscription auth and 3P providers, where dollar figures are
+   *  notional. Gate every cost tile on it rather than showing an unreconcilable
+   *  number. */
+  costsAreReal: boolean;
+  /** The CLI has an account — proof of a working credential, unlike the
+   *  stored-token check the front door uses as a proxy. */
+  authenticated: boolean;
+  /** Live context-window accounting. Null until the CLI is warm. */
+  context: ContextUsage | null;
+  account: { email?: string; organization?: string; subscriptionType?: string; apiProvider?: string } | null;
+  limits: { status?: string; resetsAt?: number; rateLimitType?: string; utilization?: number } | null;
+}
+
+export interface ContextUsage {
+  categories: Array<{ name: string; tokens: number; color: string; isDeferred?: boolean }>;
+  totalTokens: number;
+  maxTokens: number;
+  percentage: number;
+  model: string;
+  memoryFiles: Array<{ path: string; type: string; tokens: number }>;
+  mcpTools: Array<{ name: string; serverName: string; tokens: number }>;
+}
+
+export interface ChatDiag {
+  stderr: string[];
+  signals: ChatStatus["signals"];
+  hooks: ChatStatus["hooks"];
+  settingSources: string[];
+  settingSourcesNote: string;
+}
+
 export interface SpanOp { kind: "equal" | "insert" | "delete"; text: string }
 export interface SpanLine {
   no: number | null;
@@ -355,6 +400,26 @@ export const api = {
       `/api/sessions/${id}/transcript/search?q=${encodeURIComponent(q)}`,
     ),
   usage: (id: string) => req<UsageSummary>(`/api/sessions/${id}/usage`),
+  /** `warm` starts the CLI first — without a running query the context meter,
+   *  account and inventories have no data source at all. */
+  chatStatus: (id: string, warm = false) =>
+    req<ChatStatus>(`/api/sessions/${id}/chat/status${warm ? "?warm=1" : ""}`),
+  chatDiag: (id: string) => req<ChatDiag>(`/api/sessions/${id}/chat/diag`),
+  setPermissionMode: (id: string, mode: string) =>
+    req<{ mode: string }>(`/api/sessions/${id}/chat/permission-mode`, {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    }),
+  setReadOnly: (id: string, readOnly: boolean) =>
+    req<{ readOnly: boolean }>(`/api/sessions/${id}/chat/read-only`, {
+      method: "POST",
+      body: JSON.stringify({ readOnly }),
+    }),
+  setBudget: (id: string, budgetUsd: number | null) =>
+    req<{ budgetUsd: number | null }>(`/api/sessions/${id}/chat/budget`, {
+      method: "POST",
+      body: JSON.stringify({ budgetUsd }),
+    }),
   pins: (id: string) => req<{ pins: PinRecord[] }>(`/api/sessions/${id}/pins`),
   addPin: (id: string, icon: string, label: string) =>
     req<{ pin: PinRecord }>(`/api/sessions/${id}/pins`, {

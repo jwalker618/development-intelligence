@@ -55,6 +55,7 @@ function Root({ onReauth }: { onReauth: () => void }) {
   if (route === "connect") return <ConnectClaude onDone={backToWork} onSkip={backToWork} />;
   if (route === "settings") return (
     <Settings theme={theme} onTheme={setTheme} onClose={backToWork}
+      sessionId={sessionId}
       onReconnect={() => setRoute("connect")}
       onSignOut={onReauth} />
   );
@@ -89,8 +90,13 @@ function Workbench({
 
   useEffect(() => { if (live.conn === "reauth") onReauth(); }, [live.conn, onReauth]);
   useEffect(() => { void api.claudeToken().then((r) => setClaudeConnected(!!r.source)).catch(() => setClaudeConnected(true)); }, []);
+  // A stored token is only a PROXY for "Claude is connected" — a credential
+  // injected as an env var or file descriptor leaves no token on the volume, so
+  // a perfectly working session was being told to go and connect Claude. The
+  // CLI reporting an account is the fact; trust it over the proxy.
+  const connected = claudeConnected || live.status?.authenticated === true;
 
-  const { state, sessions, chat, models, usage, trees, repos, activeDiff, cavemanSavings, sample, conn, error, actions } = live;
+  const { state, sessions, chat, models, usage, trees, repos, activeDiff, cavemanSavings, status, sample, conn, error, actions } = live;
   const target = sessions.find((s) => s.id === closeTarget);
 
   return (
@@ -104,7 +110,7 @@ function Workbench({
         onCloseSession={setCloseTarget}
         screen={
           <>
-            {view === "session" && <SessionScreen s={state} chat={chat} cavemanSavings={cavemanSavings} sample={sample} claudeConnected={claudeConnected} onConnect={onConnect} onCaveman={actions.setCaveman} onSend={actions.sendMessage} onApproval={actions.resolveApproval} onInterrupt={actions.interrupt} models={models} usage={usage} onModel={actions.setModel} onEffort={actions.setEffort} onRefreshModels={actions.refreshModels} onAddPin={actions.addPin} onRemovePin={actions.removePin} onSearch={actions.search} />}
+            {view === "session" && <SessionScreen s={state} chat={chat} cavemanSavings={cavemanSavings} sample={sample} claudeConnected={connected} onConnect={onConnect} onCaveman={actions.setCaveman} onSend={actions.sendMessage} onApproval={actions.resolveApproval} onInterrupt={actions.interrupt} models={models} usage={usage} status={status} onModel={actions.setModel} onEffort={actions.setEffort} onRefreshModels={actions.refreshModels} onPermissionMode={actions.setPermissionMode} onReadOnly={actions.setReadOnly} onBudget={actions.setBudget} onAddPin={actions.addPin} onRemovePin={actions.removePin} onSearch={actions.search} />}
             {view === "changes" && <ChangesScreen s={state} activeDiff={activeDiff} sample={sample} loading={conn === "loading"} onSelect={actions.selectChange} onVerdict={actions.setVerdict} onReviewed={actions.markReviewed} onCommitSync={actions.commitSync} />}
             {view === "files" && <FilesScreen trees={trees} repos={repos} sessionId={sessionId} />}
             {view === "preview" && <PreviewScreen s={state} sample={sample} onViewport={() => undefined} onSendToAgent={() => changeView("session")} />}

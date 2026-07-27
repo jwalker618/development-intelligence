@@ -3,7 +3,7 @@ import { Icon, RailTitle } from "../primitives";
 import { RailScroll, RailDock, MainColumn } from "../Shell";
 import type { ChatMsg, ChatState } from "../control";
 import type { SAMPLE } from "../control";
-import type { ModelRow, SearchHit, UsageSummary } from "../../api";
+import type { ChatStatus, ModelRow, SearchHit, UsageSummary } from "../../api";
 import type { CavemanMode, SessionState } from "../state";
 
 const MODES: CavemanMode[] = ["off", "lite", "full", "ultra"];
@@ -30,7 +30,7 @@ function activeRow(rows: ModelRow[] | null, model: string | null, active: string
 }
 
 export function SessionScreen({
-  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, usage, onModel, onEffort, onRefreshModels, onAddPin, onRemovePin, onSearch,
+  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, usage, status, onModel, onEffort, onRefreshModels, onPermissionMode, onReadOnly, onBudget, onAddPin, onRemovePin, onSearch,
 }: {
   s: SessionState;
   chat: ChatState;
@@ -44,9 +44,13 @@ export function SessionScreen({
   onInterrupt: () => void;
   models: ModelRow[] | null;
   usage: UsageSummary | null;
+  status: ChatStatus | null;
   onModel: (m: string) => void;
   onEffort: (e: string | null) => void;
   onRefreshModels: () => void;
+  onPermissionMode: (mode: string) => void;
+  onReadOnly: (on: boolean) => void;
+  onBudget: (usd: number | null) => void;
   onAddPin: (icon: string, label: string) => void;
   onRemovePin: (id: string) => void;
   onSearch: (q: string) => Promise<SearchHit[]>;
@@ -71,7 +75,11 @@ export function SessionScreen({
       <RailScroll bottom={64}>
         <RailTitle style={{ padding: "2px 2px 11px" }}>Session</RailTitle>
 
-        <EfficiencyPanel usage={usage} cavemanSavings={cavemanSavings} />
+        <EfficiencyPanel usage={usage} cavemanSavings={cavemanSavings} costsAreReal={status?.costsAreReal ?? false} />
+
+        <ContextMeter context={status?.context ?? null} limits={chat.limits} />
+
+        <HookLiveness hooks={chat.hooks} />
 
         {/* caveman verbosity — writes the real flag via /api/caveman */}
         <div style={{ marginBottom: 16, border: "1px solid #23415f", borderRadius: 11, background: "linear-gradient(180deg,#0f2842,#0b1f34)", padding: "8px 11px 7px" }}>
@@ -158,6 +166,16 @@ export function SessionScreen({
             </button>
           )}
           <span style={{ flex: 1 }} />
+          {/* how much the agent may do without asking — the leash */}
+          <LeashPill
+            mode={chat.permissionMode}
+            readOnly={chat.readOnly}
+            budgetUsd={chat.budgetUsd}
+            costsAreReal={status?.costsAreReal ?? false}
+            onMode={onPermissionMode}
+            onReadOnly={onReadOnly}
+            onBudget={onBudget}
+          />
           {/* reasoning-effort picker — only for models that support it */}
           {(() => { const r = activeRow(models, chat.model, chat.activeModel); const lv = r ? (r.supportsEffort ? r.supportedEffortLevels : []) : []; return lv.length > 0 ? <EffortPicker value={chat.effort} levels={lv} onEffort={onEffort} /> : null; })()}
           {/* model picker (41a) */}
@@ -258,6 +276,39 @@ function ChatBody({ chat, onApproval, onSend }: { chat: ChatState; onApproval: (
               <Icon name="file-pen" size={13} color="#7f8c9a" />
               <span className="di-mono" style={{ fontSize: 11, color: "#c9d2dc" }}>{m.text}{m.file ? ` · ${m.file}` : ""}</span>
             </div>
+          </div>
+        );
+        // Auto-denied by a rule, mode or classifier — canUseTool was never
+        // called, so without this row the agent just looks like it gave up.
+        if (m.role === "denied") return (
+          <div key={m.id} style={{ width: "100%", maxWidth: 520, display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", border: "1px solid #4a2b2b", borderRadius: 9, background: "#1a1010" }}>
+            <Icon name="shield-off" size={13} color="var(--di-neg)" />
+            <span className="di-mono" style={{ fontSize: 11, color: "#e2a5a5" }}>
+              blocked · {m.text}
+            </span>
+            <span style={{ flex: 1 }} />
+            <span style={{ fontSize: 10, color: "#8a6a6a" }}>{m.level}</span>
+          </div>
+        );
+        // A banner from the loop — most often a hook's block reason, which used
+        // to vanish and leave a prompt that appeared to do nothing.
+        if (m.role === "notice") {
+          const warn = m.level === "warning" || m.stops;
+          return (
+            <div key={m.id} style={{ width: "100%", maxWidth: 560, display: "flex", gap: 8, padding: "9px 12px", border: `1px solid ${warn ? "#5a3316" : "#24384f"}`, borderRadius: 9, background: warn ? "#1a1206" : "#101a24" }}>
+              <Icon name={warn ? "alert-triangle" : "info"} size={13} color={warn ? "var(--di-warn)" : "var(--di-ink-mute)"} style={{ flex: "0 0 auto", marginTop: 2 }} />
+              <span style={{ fontSize: 11.5, lineHeight: 1.5, color: warn ? "#e8c9a0" : "#93a4b5", whiteSpace: "pre-wrap" }}>
+                {m.text}{m.stops ? " · the turn stopped here" : ""}
+              </span>
+            </div>
+          );
+        }
+        // Compaction silently changes what the agent remembers. Mark it.
+        if (m.role === "compacted") return (
+          <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "2px 0" }}>
+            <span style={{ flex: 1, height: 1, background: "#2a3a49" }} />
+            <span className="di-mono" style={{ fontSize: 10, color: "#6f8296" }}>{m.text}</span>
+            <span style={{ flex: 1, height: 1, background: "#2a3a49" }} />
           </div>
         );
         // approval — a review instrument, not a yes/no prompt
@@ -422,8 +473,9 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
-function EfficiencyPanel({ usage, cavemanSavings }: { usage: UsageSummary | null; cavemanSavings: string | null }) {
+function EfficiencyPanel({ usage, cavemanSavings, costsAreReal }: { usage: UsageSummary | null; cavemanSavings: string | null; costsAreReal: boolean }) {
   const has = !!usage && usage.turns > 0;
+  void costsAreReal; // no dollar tile here yet — see LeashPill for the gated one
   return (
     <div style={{ marginBottom: 12 }}>
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
@@ -465,6 +517,187 @@ function EfficiencyPanel({ usage, cavemanSavings }: { usage: UsageSummary | null
   );
 }
 
+
+/**
+ * Live context-window accounting, straight from the CLI.
+ *
+ * This is the honest replacement for a "% context saved" figure: there is no
+ * counterfactual anywhere in the SDK for what a turn would have cost without
+ * caveman, so we show what the window ACTUALLY holds and what is filling it.
+ */
+function ContextMeter({ context, limits }: { context: ChatStatus["context"]; limits: ChatState["limits"] }) {
+  if (!context && !limits) return null;
+  const pct = context ? Math.min(100, Math.round(context.percentage)) : 0;
+  // Warn before auto-compact rather than after: compaction is where an agent
+  // quietly forgets the thing you told it forty turns ago.
+  const tone = pct >= 85 ? "var(--di-neg)" : pct >= 65 ? "var(--di-warn)" : "var(--di-info)";
+  const top = context
+    ? [...context.categories].filter((c) => c.tokens > 0).sort((a, b) => b.tokens - a.tokens).slice(0, 3)
+    : [];
+  return (
+    <div style={{ marginBottom: 12, border: "1px solid #23415f", borderRadius: 11, background: "#0f2842", padding: "9px 11px" }}>
+      <div className="di-eyebrow" style={{ marginBottom: 6, fontSize: 9, display: "flex", alignItems: "center", gap: 6 }}>
+        Context window
+        {context && <span className="di-mono" style={{ marginLeft: "auto", color: tone, fontWeight: 600 }}>{pct}%</span>}
+      </div>
+      {context ? (
+        <>
+          <div style={{ height: 5, borderRadius: 999, background: "#12283f", overflow: "hidden", marginBottom: 7 }}>
+            <div style={{ width: `${pct}%`, height: "100%", background: tone }} />
+          </div>
+          <div className="di-mono" style={{ fontSize: 9.5, color: "#6f8296", marginBottom: top.length ? 6 : 0 }}>
+            {fmtTokens(context.totalTokens)} of {fmtTokens(context.maxTokens)}
+            {pct >= 85 ? " · auto-compact is close" : ""}
+          </div>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {top.map((c) => (
+              <span key={c.name} className="di-mono" style={{ fontSize: 9, color: "#93a4b5", border: "1px solid #24384f", borderRadius: 999, padding: "1px 7px" }}>
+                {c.name} {fmtTokens(c.tokens)}
+              </span>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 10.5, color: "#6f8296", lineHeight: 1.45 }}>Starts reporting once Claude Code is running.</div>
+      )}
+      {limits?.utilization != null && (
+        <div style={{ fontSize: 10, color: limits.status === "allowed" ? "#6f8296" : "var(--di-warn)", marginTop: 7, lineHeight: 1.45 }}>
+          Plan window: {Math.round(limits.utilization * 100)}% used
+          {limits.resetsAt ? ` · resets ${new Date(limits.resetsAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Did caveman and RTK actually fire?
+ *
+ * A boolean per hook run, honestly labelled — not a percentage. Nothing is
+ * shown until a hook has actually run, so a session with no hooks configured
+ * says nothing rather than implying failure.
+ */
+function HookLiveness({ hooks }: { hooks: ChatState["hooks"] }) {
+  if (!hooks.length) return null;
+  // Latest run wins per hook name — "did it work last time" is the question.
+  const latest = new Map<string, ChatState["hooks"][number]>();
+  for (const h of hooks) latest.set(h.name, h);
+  const rows = [...latest.values()].slice(-6);
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div className="di-eyebrow" style={{ marginBottom: 6, fontSize: 9 }}>Hooks · last run</div>
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+        {rows.map((h) => {
+          const ok = h.outcome === "success";
+          return (
+            <span key={h.name} title={`${h.event} · exit ${h.exitCode ?? "?"}`} className="di-mono"
+              style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 9, color: ok ? "var(--di-pos)" : "var(--di-neg)",
+                border: `1px solid ${ok ? "#2a3f2e" : "#4a2b2b"}`, borderRadius: 999, padding: "2px 8px" }}>
+              <span style={{ width: 5, height: 5, borderRadius: 999, background: ok ? "var(--di-pos)" : "var(--di-neg)" }} />
+              {h.name}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * How long the agent's leash is — the choice a phone-first reviewer makes
+ * before pocketing the phone. `bypassPermissions` is deliberately not offered:
+ * a review-first IDE has no use for a mode that removes the human.
+ */
+const LEASH: Array<{ id: string; label: string; sub: string }> = [
+  { id: "default", label: "Ask me", sub: "Approve every state change" },
+  { id: "acceptEdits", label: "Auto-accept edits", sub: "File edits go through; commands still ask" },
+  { id: "plan", label: "Plan first", sub: "Propose before touching anything" },
+  { id: "dontAsk", label: "Fail closed", sub: "Deny anything not pre-approved" },
+];
+
+function LeashPill({ mode, readOnly, budgetUsd, costsAreReal, onMode, onReadOnly, onBudget }: {
+  mode: string;
+  readOnly: boolean;
+  budgetUsd: number | null;
+  costsAreReal: boolean;
+  onMode: (m: string) => void;
+  onReadOnly: (on: boolean) => void;
+  onBudget: (usd: number | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [budgetDraft, setBudgetDraft] = useState("");
+  const current = LEASH.find((l) => l.id === mode) ?? LEASH[0];
+  const tone = readOnly ? "var(--di-pos)" : mode === "default" ? "var(--di-info)" : "var(--di-warn)";
+  return (
+    <div style={{ position: "relative" }}>
+      <button className="di-btn" onClick={() => setOpen((v) => !v)} aria-expanded={open}
+        style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 28, padding: "0 12px", border: `1px solid ${tone}55`, borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
+        <Icon name={readOnly ? "eye" : mode === "default" ? "shield" : "shield-alert"} size={13} color={tone} />
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>
+          {readOnly ? "Read-only" : current.label}
+        </span>
+        <Icon name="chevron-down" size={13} color="var(--cc-ink-mute)" />
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+          <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 288, zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
+            <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9 }}>How much may Claude do alone?</div>
+            {LEASH.map((l) => {
+              const active = l.id === mode;
+              return (
+                <button key={l.id} className="di-row di-btn" disabled={readOnly}
+                  onClick={() => { onMode(l.id); setOpen(false); }}
+                  style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "9px 11px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: readOnly ? "default" : "pointer", opacity: readOnly ? 0.45 : 1, marginBottom: 2 }}>
+                  <Icon name={active ? "check-circle-2" : "circle"} size={15} color={active ? "var(--di-info)" : "#33475c"} />
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{l.label}</span>
+                    <span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{l.sub}</span>
+                  </span>
+                </button>
+              );
+            })}
+
+            {/* Read-only is not a mode — it REMOVES the mutating tools, so the
+                promise holds even if the model is asked nicely. */}
+            <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 11px", borderTop: "1px solid #17293a", marginTop: 5, cursor: "pointer" }}>
+              <input type="checkbox" checked={readOnly} onChange={(e) => onReadOnly(e.target.checked)} style={{ accentColor: "var(--di-pos)" }} />
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: "block", fontSize: 12, color: "var(--di-ink)" }}>Read-only review</span>
+                <span style={{ display: "block", fontSize: 10.5, color: "#6f8296", lineHeight: 1.4 }}>Write, Edit and Bash are removed from the session — not just discouraged.</span>
+              </span>
+            </label>
+
+            {costsAreReal ? (
+              <div style={{ padding: "10px 11px", borderTop: "1px solid #17293a" }}>
+                <div className="di-eyebrow" style={{ fontSize: 9, marginBottom: 7 }}>Spend ceiling</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, height: 32, padding: "0 10px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "#0e2032" }}>
+                    <span style={{ fontSize: 12, color: "#6f8296" }}>$</span>
+                    <input value={budgetDraft} onChange={(e) => setBudgetDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { const n = Number(budgetDraft); onBudget(Number.isFinite(n) && n > 0 ? n : null); setOpen(false); } }}
+                      placeholder={budgetUsd ? String(budgetUsd) : "no limit"}
+                      className="di-mono" style={{ flex: 1, minWidth: 0, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 12 }} />
+                  </div>
+                  {budgetUsd !== null && (
+                    <button className="di-btn" onClick={() => { onBudget(null); setBudgetDraft(""); }}
+                      style={{ flex: "0 0 auto", height: 32, padding: "0 11px", border: "1px solid var(--di-rule)", borderRadius: 8, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 11.5, cursor: "pointer" }}>Clear</button>
+                  )}
+                </div>
+                <div style={{ fontSize: 10, color: "#6f8296", marginTop: 6, lineHeight: 1.4 }}>The turn stops when this is exceeded. Raise it here to continue.</div>
+              </div>
+            ) : (
+              // Never show a dollar ceiling we cannot honestly meter.
+              <div style={{ padding: "10px 11px", borderTop: "1px solid #17293a", fontSize: 10.5, color: "#6f8296", lineHeight: 1.45 }}>
+                Spend ceiling is unavailable on subscription auth — the cost figures the SDK reports are notional there.
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 /** The approval card. Uses everything the SDK gives us about a tool request:
  *  blast radius (description), the path that tripped it, why it was asked, and
