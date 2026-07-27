@@ -29,7 +29,11 @@ RUN apt-get update \
 # Pin pnpm — unpinned "latest" drifted into a version that treats un-approved
 # dependency build scripts (node-pty, esbuild) as a fatal install error. The
 # build scripts are approved via pnpm.onlyBuiltDependencies in package.json.
-RUN npm install -g pnpm@10.33.0 @anthropic-ai/claude-code
+# The CLI is PINNED to the same Claude Code build the Agent SDK bundles
+# (claude-agent-sdk 0.3.220 -> claudeCodeVersion 2.1.220). Leaving it unpinned
+# let the terminal's CLI drift ahead of the SDK, so the two disagreed about which
+# models exist — the reason a new model showed in the terminal but not the picker.
+RUN npm install -g pnpm@10.33.0 @anthropic-ai/claude-code@2.1.220
 
 # Gemini CLI for multi-model routing from the same PTY (best-effort — grotto
 # works without it). Installed before caveman so its installer detects it.

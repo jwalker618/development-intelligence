@@ -3,49 +3,34 @@ import { Icon, RailTitle } from "../primitives";
 import { RailScroll, RailDock, MainColumn } from "../Shell";
 import type { ChatState } from "../control";
 import type { SAMPLE } from "../control";
-import type { SearchHit } from "../../api";
+import type { ModelRow, SearchHit } from "../../api";
 import type { CavemanMode, SessionState } from "../state";
 
 const MODES: CavemanMode[] = ["off", "lite", "full", "ultra"];
 const BAR_H = [22, 46, 70, 100];
 const BAR_TINT = ["#2b4056", "#5a4326", "#8a5a24", "#a8641f"];
 
-// `id` is the real SDK model identifier passed to query(); `label` is display.
-const MODELS = [
-  { id: "claude-sonnet-5", label: "Sonnet 5", sub: "Balanced · best for review loops" },
-  { id: "claude-opus-4-8", label: "Opus 4.8", sub: "Deepest reasoning · slower, pricier" },
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", sub: "Fastest · light edits and chores" },
-  { id: "claude-fable-5", label: "Fable 5", sub: "Creative long-form · Claude 5 family" },
-];
+/** Display copy for an effort level; the AVAILABLE levels come per-model from
+ *  the SDK catalog (ModelInfo.supportedEffortLevels), never from a hardcode. */
+const EFFORT_META: Record<string, { label: string; sub: string }> = {
+  low: { label: "Low", sub: "Minimal thinking · fastest" },
+  medium: { label: "Medium", sub: "Moderate thinking" },
+  high: { label: "High", sub: "Deep reasoning · default" },
+  xhigh: { label: "X-High", sub: "Deeper than high" },
+  max: { label: "Max", sub: "Maximum effort" },
+};
 
-const EFFORTS = [
-  { id: "low", label: "Low", sub: "Minimal thinking · fastest" },
-  { id: "medium", label: "Medium", sub: "Moderate thinking" },
-  { id: "high", label: "High", sub: "Deep reasoning · default" },
-  { id: "xhigh", label: "X-High", sub: "Deeper than high" },
-  { id: "max", label: "Max", sub: "Maximum effort" },
-];
-
-/** Haiku has no effort levels; everything else (incl. the default) does. */
-function modelSupportsEffort(id?: string | null): boolean {
-  return !(id ?? "").toLowerCase().includes("haiku");
-}
-
-/** Friendly label for a raw SDK model id (which may carry a date suffix). */
-function modelLabel(id?: string | null): string {
-  if (!id) return "Default model";
-  const exact = MODELS.find((m) => m.id === id);
-  if (exact) return exact.label;
-  const l = id.toLowerCase();
-  if (l.includes("opus")) return "Opus";
-  if (l.includes("sonnet")) return "Sonnet";
-  if (l.includes("haiku")) return "Haiku";
-  if (l.includes("fable")) return "Fable";
-  return id;
+/** The catalog row for the current session: the user's explicit pick if any,
+ *  else the row matching what the CLI actually resolved (Default sessions). */
+function activeRow(rows: ModelRow[] | null, model: string | null, active: string | null): ModelRow | null {
+  if (!rows?.length) return null;
+  if (model) return rows.find((r) => r.value === model || r.resolvedModel === model) ?? null;
+  if (active) return rows.find((r) => r.resolvedModel === active || r.value === active) ?? null;
+  return null;
 }
 
 export function SessionScreen({
-  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, onModel, onEffort, onAddPin, onRemovePin, onSearch,
+  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, onModel, onEffort, onRefreshModels, onAddPin, onRemovePin, onSearch,
 }: {
   s: SessionState;
   chat: ChatState;
@@ -57,8 +42,10 @@ export function SessionScreen({
   onSend: (text: string) => void;
   onApproval: (id: string, d: "allow" | "always" | "deny") => void;
   onInterrupt: () => void;
+  models: ModelRow[] | null;
   onModel: (m: string) => void;
   onEffort: (e: string | null) => void;
+  onRefreshModels: () => void;
   onAddPin: (icon: string, label: string) => void;
   onRemovePin: (id: string) => void;
   onSearch: (q: string) => Promise<SearchHit[]>;
@@ -177,30 +164,38 @@ export function SessionScreen({
           )}
           <span style={{ flex: 1 }} />
           {/* reasoning-effort picker — only for models that support it */}
-          {modelSupportsEffort(chat.model) && <EffortPicker value={chat.effort} onEffort={onEffort} />}
+          {(() => { const r = activeRow(models, chat.model, chat.activeModel); const lv = r ? (r.supportsEffort ? r.supportedEffortLevels : []) : []; return lv.length > 0 ? <EffortPicker value={chat.effort} levels={lv} onEffort={onEffort} /> : null; })()}
           {/* model picker (41a) */}
           <div style={{ position: "relative" }}>
             <button className="di-btn" onClick={() => setModelMenu((m) => !m)} style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 28, padding: "0 12px", border: "1px solid #34608c", borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
               <span style={{ width: 7, height: 7, borderRadius: 999, background: "var(--di-info)" }} />
-              <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>{modelLabel(chat.model)}</span>
+              <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--cc-ink)" }}>{activeRow(models, chat.model, chat.activeModel)?.displayName ?? (chat.model ?? "Default")}</span>
               <Icon name="chevron-down" size={13} color="var(--cc-ink-mute)" />
             </button>
             {modelMenu && (
               <>
                 <div onClick={() => setModelMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
                 <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 260, zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
-                  <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9 }}>Model for this session</div>
-                  {MODELS.map((m) => {
-                    const active = chat.model === m.id;
+                  <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9, display: "flex", alignItems: "center", gap: 6 }}>
+                    Model for this session
+                    <button className="di-btn" onClick={onRefreshModels} title="Refresh model list"
+                      style={{ marginLeft: "auto", border: 0, background: "transparent", cursor: "pointer", padding: 0, display: "flex" }}>
+                      <Icon name="refresh-cw" size={11} color="var(--di-ink-mute)" />
+                    </button>
+                  </div>
+                  {models === null && <div style={{ padding: "10px 12px", fontSize: 11.5, color: "#6f8296" }}>Loading models…</div>}
+                  {models !== null && models.length === 0 && <div style={{ padding: "10px 12px", fontSize: 11.5, color: "var(--di-warn)" }}>No models returned — check Claude auth.</div>}
+                  {(models ?? []).map((m) => {
+                    const active = chat.model ? (chat.model === m.value || chat.model === m.resolvedModel) : false;
                     return (
-                      <button key={m.id} className="di-row di-btn" onClick={() => { onModel(m.id); setModelMenu(false); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: "pointer", marginBottom: 2 }}>
+                      <button key={m.value} className="di-row di-btn" onClick={() => { onModel(m.value); setModelMenu(false); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: "pointer", marginBottom: 2 }}>
                         <Icon name={active ? "check-circle-2" : "circle"} size={15} color={active ? "var(--di-info)" : "#33475c"} />
-                        <span style={{ flex: 1 }}><span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{m.label}</span><span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{m.sub}</span></span>
+                        <span style={{ flex: 1, minWidth: 0 }}><span style={{ display: "block", fontSize: 12.5, color: "var(--di-ink)" }}>{m.displayName}</span><span style={{ display: "block", fontSize: 10.5, color: "#6f8296" }}>{m.description}</span></span>
                       </button>
                     );
                   })}
                   <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 8px 4px", borderTop: "1px solid #17293a", marginTop: 4 }}>
-                    <Icon name="lock" size={12} color="var(--di-ink-mute)" /><span style={{ fontSize: 10.5, color: "#6f8296" }}>Applies to new messages. Caveman keeps trimming context on any model.</span>
+                    <Icon name="lock" size={12} color="var(--di-ink-mute)" /><span style={{ fontSize: 10.5, color: "#6f8296" }}>Live from Claude Code. Applies to new messages.</span>
                   </div>
                 </div>
               </>
@@ -342,9 +337,11 @@ const ROLE_META: Record<SearchHit["role"], { icon: string; color: string; label:
 };
 
 /** Reasoning-effort picker — sits beside the model pill. Default is High. */
-function EffortPicker({ value, onEffort }: { value: string | null; onEffort: (e: string | null) => void }) {
+function EffortPicker({ value, levels, onEffort }: { value: string | null; levels: string[]; onEffort: (e: string | null) => void }) {
   const [open, setOpen] = useState(false);
-  const current = EFFORTS.find((e) => e.id === value) ?? EFFORTS.find((e) => e.id === "high")!;
+  // Only levels this model actually supports (from the SDK catalog).
+  const rows = levels.map((id) => ({ id, ...(EFFORT_META[id] ?? { label: id, sub: "" }) }));
+  const current = rows.find((e) => e.id === value) ?? rows.find((e) => e.id === "high") ?? rows[rows.length - 1];
   return (
     <div style={{ position: "relative" }}>
       <button className="di-btn" onClick={() => setOpen((o) => !o)} title="Reasoning effort" style={{ display: "inline-flex", alignItems: "center", gap: 6, height: 28, padding: "0 11px", border: "1px solid #34608c", borderRadius: 999, background: "#0c2536", cursor: "pointer" }}>
@@ -357,7 +354,7 @@ function EffortPicker({ value, onEffort }: { value: string | null; onEffort: (e:
           <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
           <div className="di-menu" style={{ position: "absolute", top: 34, right: 0, width: 230, zIndex: 21, border: "1px solid #2c5075", borderRadius: 13, background: "#0a1a2a", boxShadow: "0 30px 70px -18px rgba(0,0,0,.85)", padding: 9 }}>
             <div className="di-eyebrow" style={{ padding: "5px 6px 8px", fontSize: 9 }}>Reasoning effort</div>
-            {EFFORTS.map((e) => {
+            {rows.map((e) => {
               const active = current.id === e.id;
               return (
                 <button key={e.id} className="di-row di-btn" onClick={() => { onEffort(e.id); setOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 9, border: 0, background: active ? "#12283f" : "transparent", cursor: "pointer", marginBottom: 2 }}>

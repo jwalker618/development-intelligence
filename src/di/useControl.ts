@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type SearchHit, type SessionInfo } from "../api";
+import { api, type ModelRow, type SearchHit, type SessionInfo } from "../api";
 import {
   SAMPLE, buildTree, mapSpanDiff, parseDiff, setCavemanMode, subscribeChat, toChanges, toDialMode, toTimeline,
   type ChatMsg, type ChatState, type Move, type TreeNode,
@@ -12,6 +12,7 @@ export interface Live {
   state: SessionState;
   sessions: SessionInfo[];
   chat: ChatState;
+  models: ModelRow[] | null;
   tree: TreeNode | null;
   activeDiff: { path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null;
   cavemanSavings: string | null;
@@ -32,6 +33,7 @@ export interface Actions {
   interrupt: () => void;
   setModel: (model: string) => void;
   setEffort: (effort: string | null) => void;
+  refreshModels: () => void;
   addPin: (icon: string, label: string) => void;
   removePin: (id: string) => void;
   search: (q: string) => Promise<SearchHit[]>;
@@ -45,10 +47,12 @@ const is401 = (e: unknown) => e instanceof Error && /\b401\b/.test(e.message);
 export function useControl(sessionId: string | null): Live {
   const [state, setState] = useState<SessionState>(seedState);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [chat, setChat] = useState<ChatState>({ messages: [], busy: false, model: null, effort: null, pendingApprovalId: null });
+  const [chat, setChat] = useState<ChatState>({ messages: [], busy: false, model: null, activeModel: null, effort: null, pendingApprovalId: null });
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [activeDiff, setActiveDiff] = useState<{ path: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null>(null);
   const [cavemanSavings, setCavemanSavings] = useState<string | null>(null);
+  const [models, setModels] = useState<ModelRow[] | null>(null);
+  const modelsFor = useRef<string | null>(null);
   const [conn, setConn] = useState<Conn>("loading");
   const [error, setError] = useState<string | null>(null);
   const reviewed = useRef(new Set<string>());
@@ -98,6 +102,20 @@ export function useControl(sessionId: string | null): Live {
     })();
     return () => stop?.();
   }, [sessionId, loadSession]);
+
+  // Live model catalog. Guarded against a slow response from a previous session
+  // landing in the new one (a cold enumeration can take ~1s+).
+  const loadModels = useCallback(async (id: string | null, force = false) => {
+    modelsFor.current = id;
+    try {
+      const cat = await api.models(id ?? undefined, force);
+      if (modelsFor.current === id) setModels(cat.models);
+    } catch {
+      if (modelsFor.current === id) setModels(null);
+    }
+  }, []);
+
+  useEffect(() => { void loadModels(sessionId); }, [sessionId, loadModels]);
 
   // Mirror the caveman flag on a ~15s poll.
   useEffect(() => {
@@ -155,10 +173,11 @@ export function useControl(sessionId: string | null): Live {
       }).catch(guard);
     },
     search: (q) => sessionId ? api.searchTranscript(sessionId, q).then((r) => r.hits).catch(() => []) : Promise.resolve([]),
+    refreshModels: () => { void loadModels(sessionId, true); },
     refresh: () => { if (sessionId) void loadSession(sessionId); },
   };
 
-  return { state, sessions, chat, tree, activeDiff, cavemanSavings, sample: SAMPLE, conn, error, actions };
+  return { state, sessions, chat, models, tree, activeDiff, cavemanSavings, sample: SAMPLE, conn, error, actions };
 }
 
 function foldOne(ev: { kind?: string; [k: string]: unknown }): ChatMsg[] {

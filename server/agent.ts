@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   query,
   type EffortLevel,
+  type ModelInfo,
   type PermissionResult,
   type PermissionUpdate,
   type Query,
@@ -81,6 +82,10 @@ export class AgentChat {
   } | null = null;
   private meta: ChatMeta = {};
   private busy = false;
+  /** Model the CLI resolved for the current run. NOT persisted: writing it into
+   *  meta permanently version-pins a session the user never configured, so a
+   *  "Default" session would silently stick to whatever was newest that day. */
+  private active: string | null = null;
 
   constructor(
     private cfg: GrottoConfig,
@@ -167,6 +172,7 @@ export class AgentChat {
         events: this.events,
         busy: this.busy,
         model: this.meta.model ?? null,
+        activeModel: this.active,
         effort: this.meta.effort ?? null,
         pendingApproval: this.pending ? this.lastApprovalEvent() : null,
       }),
@@ -186,6 +192,18 @@ export class AgentChat {
 
   get model(): string | null {
     return this.meta.model ?? null;
+  }
+
+  /** The model the CLI actually resolved for this session (may differ from the
+   *  user's choice, e.g. when they left it on Default). */
+  get activeModel(): string | null {
+    return this.active;
+  }
+
+  /** Live catalog off the running query — free, it reuses the cached init
+   *  result. Null when no conversation is running. */
+  supportedModels(): Promise<ModelInfo[]> | null {
+    return this.q ? this.q.supportedModels() : null;
   }
 
   send(text: string): void {
@@ -329,7 +347,7 @@ export class AgentChat {
             case "system":
               if (msg.subtype === "init") {
                 this.meta.claudeSessionId = msg.session_id;
-                if (!this.meta.model) this.meta.model = msg.model;
+                this.active = msg.model;
                 this.saveMeta();
                 this.emit("init", { model: msg.model });
                 this.setBusy(true);

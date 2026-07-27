@@ -200,6 +200,8 @@ export interface ChatState {
   messages: ChatMsg[];
   busy: boolean;
   model: string | null;
+  /** What the CLI actually resolved (differs from `model` when on Default). */
+  activeModel: string | null;
   effort: string | null;
   pendingApprovalId: string | null;
 }
@@ -254,6 +256,7 @@ export function subscribeChat(
           messages: foldHello((f.events as ChatEvent[]) ?? []),
           busy: !!f.busy,
           model: (f.model as string) ?? null,
+          activeModel: (f.activeModel as string) ?? null,
           effort: (f.effort as string) ?? null,
           pendingApprovalId: f.pendingApproval ? String((f.pendingApproval as ChatEvent).id ?? "") : null,
         });

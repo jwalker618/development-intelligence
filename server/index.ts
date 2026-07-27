@@ -4,7 +4,7 @@ import http from "node:http";
 import path from "node:path";
 import { WebSocketServer } from "ws";
 import { LoginThrottle, Logins, Mfa, safeEq } from "./auth.js";
-import { AgentChats } from "./agent.js";
+import { AgentChats, type AgentChat } from "./agent.js";
 import { cavemanStatus, setCavemanMode } from "./caveman.js";
 import { ClaudeAuth } from "./claude-auth.js";
 import { doctor, repair } from "./doctor.js";
@@ -34,6 +34,7 @@ import { DiagTerm } from "./diag-term.js";
 import { assertOk, parseStatus, runGit, type GitResult } from "./git.js";
 import { createGithubRepo, listGithubRepos } from "./github.js";
 import { HttpError, Router, sendJson, serveStatic } from "./http.js";
+import { isKnownModel, listModels } from "./models.js";
 import { Pins } from "./pins.js";
 import { proxyHttp, proxyUpgrade } from "./proxy.js";
 import { searchTranscript } from "./search.js";
@@ -287,10 +288,40 @@ router.on("POST", "/api/sessions/:id/chat/interrupt", async ({ params }) => {
   return { ok: true };
 });
 
+/** Live model catalog — replaces the hand-written list that went stale. */
+router.on("GET", "/api/models", async ({ req, query }) => {
+  // A cold enumeration spawns a subprocess and runs the repo's SessionStart
+  // hooks, so require a real bearer — never the cookie (SameSite=Lax would let
+  // a cross-site top-level GET reach it).
+  if (!(req.headers.authorization ?? "").startsWith("Bearer ")) {
+    throw new HttpError(403, "bearer credential required");
+  }
+  const id = query.get("session");
+  let live: ReturnType<AgentChat["supportedModels"]> = null;
+  if (id) {
+    try {
+      live = chats.peek(id)?.supportedModels() ?? null;
+    } catch {
+      live = null;
+    }
+  }
+  return listModels(cfg, live, query.get("refresh") === "1");
+});
+
 router.on("POST", "/api/sessions/:id/chat/model", async ({ params, body }) => {
   const b = (body ?? {}) as { model?: string | null };
+  const model = b.model?.trim() || null;
+  // Was unvalidated: any string got persisted and the CLI's rejection swallowed,
+  // leaving a session pinned to a model that does not exist.
+  if (model) {
+    if (model.length > 128) throw new HttpError(400, "model id too long");
+    const { models } = await listModels(cfg, null);
+    if (models.length && !isKnownModel(models, model)) {
+      throw new HttpError(400, `unknown model: ${model}`);
+    }
+  }
   const s = manager.get(params.id);
-  await chats.get(s.id, s.dir).setModel(b.model?.trim() || null);
+  await chats.get(s.id, s.dir).setModel(model);
   return { ok: true };
 });
 

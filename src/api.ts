@@ -42,6 +42,21 @@ export interface GitLogEntry {
   when: string;
 }
 
+/** One row of the live model catalog (server/models.ts). */
+export interface ModelRow {
+  value: string;
+  resolvedModel?: string;
+  displayName: string;
+  description: string;
+  supportsEffort: boolean;
+  supportedEffortLevels: string[];
+}
+export interface ModelCatalog {
+  models: ModelRow[];
+  source: "live" | "cache" | "fallback";
+  error?: string;
+}
+
 /** Semantic span-diff (server/spandiff.ts): token-level inline ops + move blocks. */
 export interface SpanOp { kind: "equal" | "insert" | "delete"; text: string }
 export interface SpanLine {
@@ -184,6 +199,10 @@ export const api = {
       body: JSON.stringify({ name, private: isPrivate }),
     }),
   caveman: () => req<CavemanStatus>("/api/caveman"),
+  models: (sessionId?: string, refresh = false) =>
+    req<ModelCatalog>(
+      `/api/models${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ""}${refresh ? (sessionId ? "&" : "?") + "refresh=1" : ""}`,
+    ),
   logout: () => req("/api/login", { method: "DELETE" }),
   mfa: () => req<{ enabled: boolean }>("/api/mfa"),
   mfaSetup: () =>
