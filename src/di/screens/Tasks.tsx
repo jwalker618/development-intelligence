@@ -6,23 +6,36 @@ import type { SAMPLE } from "../control";
 import type { LiveTask } from "../control";
 import type { SessionState, TaskManifest, TaskParam } from "../state";
 
-/** What the agent is doing right now. Nothing renders when nothing is running,
- *  so this never competes with the palette for attention. */
+/**
+ * "Now · the agent is doing this" (46c).
+ *
+ * The agent's OWN subagents and background commands. Deliberately shaped
+ * unlike the runbook palette below it: a rule-less list on the sunken panel,
+ * pulsing dots, no cards and no chevrons — nothing here is configured by you,
+ * and it disappears when it finishes.
+ */
 function InFlight({ live }: { live: LiveTask[] }) {
-  if (!live.length) return null;
   const done = (t: LiveTask) => /complete|done|finish/i.test(t.status);
   const failed = (t: LiveTask) => /fail|error|cancel/i.test(t.status);
+  const running = live.filter((t) => !done(t) && !failed(t));
   return (
     <div style={{ marginTop: 12 }}>
-      <div className="di-eyebrow" style={{ marginBottom: 8, fontSize: 9, color: "var(--di-rail-hue)" }}>
-        In flight · {live.filter((t) => !done(t) && !failed(t)).length} running
+      <div className="di-eyebrow" style={{ marginBottom: 3, fontSize: 9, color: "var(--di-rail-hue)" }}>
+        Now · the agent is doing this
       </div>
-      {live.slice(-8).reverse().map((t) => {
-        const tone = failed(t) ? "var(--di-neg)" : done(t) ? "var(--di-pos)" : "var(--di-rail-hue)";
-        return (
-          <div key={t.id} style={{ display: "flex", alignItems: "flex-start", gap: 9, padding: "8px 10px", border: "1px solid var(--di-rail-row-border)", borderRadius: 9, background: "var(--di-rail-row-bg)", marginBottom: 5 }}>
-            <span style={{ width: 7, height: 7, flex: "0 0 auto", marginTop: 4, borderRadius: 999, background: tone,
-              animation: done(t) || failed(t) ? undefined : "di-pulse 1.6s infinite" }} />
+      <div style={{ fontSize: 10, color: "#6f8296", lineHeight: 1.45, marginBottom: 8 }}>
+        Its own subagents and background commands. Nothing here is configured by you.
+      </div>
+      {running.length === 0 ? (
+        /* The structure stays when nothing is running, so the boundary between
+           the two registers is learned before it is needed (49d). */
+        <div style={{ fontSize: 11, color: "#6f8296", padding: "2px 2px 4px", lineHeight: 1.5 }}>
+          The agent isn't running anything. This section fills itself when it starts a subagent or a background command.
+        </div>
+      ) : (
+        running.slice(-8).reverse().map((t) => (
+          <div key={t.id} style={{ display: "flex", alignItems: "flex-start", gap: 9, padding: "5px 2px" }}>
+            <span style={{ width: 6, height: 6, flex: "0 0 auto", marginTop: 5, borderRadius: 999, background: "var(--di-rail-hue)", animation: "di-pulse 1.6s infinite" }} />
             <span style={{ flex: 1, minWidth: 0 }}>
               <span style={{ display: "block", fontSize: 11.5, color: "var(--di-ink)", lineHeight: 1.4 }}>{t.label}</span>
               <span className="di-mono" style={{ display: "block", fontSize: 9.5, color: "#6f8296", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -30,8 +43,19 @@ function InFlight({ live }: { live: LiveTask[] }) {
               </span>
             </span>
           </div>
-        );
-      })}
+        ))
+      )}
+    </div>
+  );
+}
+
+/** The boundary is stated in words, not implied by a heading change (46c). */
+function RegisterDivider() {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 9, margin: "14px 0 10px" }}>
+      <span style={{ flex: 1, height: 1, background: "var(--di-rule)" }} />
+      <span className="di-mono" style={{ fontSize: 9, color: "#3e5670" }}>different thing</span>
+      <span style={{ flex: 1, height: 1, background: "var(--di-rule)" }} />
     </div>
   );
 }
@@ -50,17 +74,23 @@ export function TasksScreen({ s, sample, live }: { s: SessionState; sample: type
   return (
     <>
       {/* ── rail: task palette ── */}
-      <RailTitle style={{ position: "absolute", top: 52, left: 0, width: 340, boxSizing: "border-box", padding: "0 14px", zIndex: 5, display: "flex", alignItems: "center", gap: 6 }}>Tasks {sample.tasks && <SampleChip />}</RailTitle>
+      <RailTitle style={{ position: "absolute", top: 52, left: 0, width: 340, boxSizing: "border-box", padding: "0 14px", zIndex: 5 }}>Tasks</RailTitle>
       <div style={{ position: "absolute", top: 78, left: 0, width: 340, boxSizing: "border-box", padding: "0 14px", zIndex: 5 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, height: 34, padding: "0 11px", border: "1px solid var(--di-rail-row-border)", borderRadius: 9, background: "var(--di-rail-row-bg)" }}>
           <Icon name="search" size={14} color="var(--di-rail-hue)" />
           <span style={{ fontSize: 11.5, color: "#6f8296", flex: 1 }}>Search tasks…</span>
           <span className="di-mono" style={{ fontSize: 10, color: "#6f8296" }}>⌘K</span>
         </div>
-        {/* LIVE — a distinct section above the seeded palette. These are the
-            agent's own subagents and background commands, not the runbooks
-            below; the palette stays honestly labelled as sample. */}
+        {/* Two shapes on one screen. Both answer "what is running", and they
+            never share a shape — see RegisterDivider. */}
         <InFlight live={live} />
+        <RegisterDivider />
+        <div className="di-eyebrow" style={{ fontSize: 9, marginBottom: 3, display: "flex", alignItems: "center", gap: 6 }}>
+          Runbooks · you configure these{sample.tasks && <SampleChip />}
+        </div>
+        <div style={{ fontSize: 10, color: "#6f8296", lineHeight: 1.45 }}>
+          Saved commands with typed parameters. They wait here until you run them.
+        </div>
       </div>
 
       <div className="di-scroll" style={{ position: "absolute", top: 124, left: 0, width: 340, bottom: 56, boxSizing: "border-box", padding: "0 14px", zIndex: 5 }}>

@@ -96,7 +96,7 @@ function Workbench({
   // CLI reporting an account is the fact; trust it over the proxy.
   const connected = claudeConnected || live.status?.authenticated === true;
 
-  const { state, sessions, chat, models, usage, trees, repos, activeDiff, cavemanSavings, status, sample, conn, error, actions } = live;
+  const { state, sessions, chat, models, usage, trees, repos, syncing, activeDiff, cavemanSavings, status, statusAt, offline, sample, conn, error, actions } = live;
   const target = sessions.find((s) => s.id === closeTarget);
 
   return (
@@ -110,8 +110,8 @@ function Workbench({
         onCloseSession={setCloseTarget}
         screen={
           <>
-            {view === "session" && <SessionScreen s={state} chat={chat} cavemanSavings={cavemanSavings} sample={sample} claudeConnected={connected} onConnect={onConnect} onCaveman={actions.setCaveman} onSend={actions.sendMessage} onApproval={actions.resolveApproval} onInterrupt={actions.interrupt} models={models} usage={usage} status={status} onModel={actions.setModel} onEffort={actions.setEffort} onRefreshModels={actions.refreshModels} onPermissionMode={actions.setPermissionMode} onReadOnly={actions.setReadOnly} onBudget={actions.setBudget} onMaxTurns={actions.setMaxTurns} onPreviewRewind={actions.previewRewind} onRewind={actions.rewind} onAddPin={actions.addPin} onRemovePin={actions.removePin} onSearch={actions.search} />}
-            {view === "changes" && <ChangesScreen s={state} activeDiff={activeDiff} sample={sample} loading={conn === "loading"} onSelect={actions.selectChange} onVerdict={actions.setVerdict} onReviewed={actions.markReviewed} onCommitSync={actions.commitSync} />}
+            {view === "session" && <SessionScreen s={state} chat={chat} cavemanSavings={cavemanSavings} sample={sample} claudeConnected={connected} onConnect={onConnect} onCaveman={actions.setCaveman} onSend={actions.sendMessage} onApproval={actions.resolveApproval} onInterrupt={actions.interrupt} models={models} usage={usage} status={status} statusAt={statusAt} offline={offline} onModel={actions.setModel} onEffort={actions.setEffort} onRefreshModels={actions.refreshModels} onPermissionMode={actions.setPermissionMode} onReadOnly={actions.setReadOnly} onBudget={actions.setBudget} onMaxTurns={actions.setMaxTurns} onOpenDiagnostics={onSettings} onPreviewRewind={actions.previewRewind} onRewind={actions.rewind} onAddPin={actions.addPin} onRemovePin={actions.removePin} onSearch={actions.search} />}
+            {view === "changes" && <ChangesScreen s={state} repos={repos} syncing={syncing} activeDiff={activeDiff} sample={sample} loading={conn === "loading"} onSelect={actions.selectChange} onVerdict={actions.setVerdict} onReviewed={actions.markReviewed} onCommitSync={actions.commitSync} />}
             {view === "files" && <FilesScreen trees={trees} repos={repos} sessionId={sessionId} />}
             {view === "preview" && <PreviewScreen s={state} sample={sample} onViewport={() => undefined} onSendToAgent={() => changeView("session")} />}
             {view === "tasks" && <TasksScreen s={state} sample={sample} live={chat.tasks} />}
