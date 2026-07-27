@@ -130,22 +130,35 @@ function NavDropdown({ p, onClose }: { p: FrameProps; onClose: () => void }) {
 const MAX_REPOS = 6;
 
 /**
- * The session's repositories. Adding one clones it alongside the primary and
- * hands it to the agent as an extra working directory, so the next turn can
- * read and edit across both. The primary can't be removed — it is the agent's
- * cwd and the session's identity.
+ * The session's repositories (44b / 44c).
+ *
+ * Stays in the nav dropdown because it is session *setup*, not a place you
+ * work — per-repo STATE moved out instead (branches to Changes, trees to
+ * Files). Cloning is a real progress row with elapsed seconds, a failed clone
+ * keeps its error and offers a retry, and removal confirms with its blast
+ * radius stated: this deletes a checkout and anything uncommitted in it.
  */
 function ReposSection({ p }: { p: FrameProps }) {
   const [adding, setAdding] = useState(false);
   const [query, setQuery] = useState("");
   const [available, setAvailable] = useState<string[]>([]);
+  const [cloning, setCloning] = useState<{ repo: string; at: number } | null>(null);
+  const [confirm, setConfirm] = useState<RepoRef | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
     if (!adding || available.length) return;
     void api.repos().then((r) => setAvailable(r.repos)).catch(() => setAvailable([]));
   }, [adding, available.length]);
+
+  // A clone can take minutes; a static "Cloning…" reads as a hang.
+  useEffect(() => {
+    if (!cloning) { setElapsed(0); return; }
+    const t = setInterval(() => setElapsed(Math.round((Date.now() - cloning.at) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [cloning]);
 
   const inSession = p.repos.map((r) => r.repo);
   const matches = useMemo(() => {
@@ -157,52 +170,103 @@ function ReposSection({ p }: { p: FrameProps }) {
     return hits.slice(0, 4);
   }, [query, available, inSession.join(",")]);
 
-  const run = async (label: string, fn: () => Promise<void>) => {
-    setBusy(label); setError(null);
-    try { await fn(); setQuery(""); setAdding(false); }
+  const add = async (repo: string) => {
+    setCloning({ repo, at: Date.now() }); setError(null); setAdding(false); setQuery("");
+    try { await p.onAddRepo(repo, null); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setCloning(null); }
+  };
+  const remove = async (r: RepoRef) => {
+    setBusy(r.name); setError(null); setConfirm(null);
+    try { await p.onRemoveRepo(r.name); }
     catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(null); }
   };
 
   if (!p.repos.length) return null;
+  const total = p.repos.length + (cloning ? 1 : 0);
   return (
     <div style={{ padding: "9px 13px", borderTop: "1px solid #17293a" }}>
-      <div className="di-eyebrow" style={{ padding: "2px 4px 8px", fontSize: 9 }}>
-        Repositories · {p.repos.length}
+      <div className="di-eyebrow" style={{ padding: "2px 4px 8px", fontSize: 9, display: "flex", alignItems: "center" }}>
+        Repositories
+        <span className="di-mono" style={{ marginLeft: "auto", fontSize: 9.5, letterSpacing: 0, textTransform: "none", color: "#6f8296" }}>{total} / {MAX_REPOS}</span>
       </div>
-      {p.repos.map((r, i) => (
-        <div key={r.name} style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 9px", borderRadius: 8, marginBottom: 3, background: i === 0 ? "#0e2032" : "transparent", border: `1px solid ${i === 0 ? "#1d3b4f" : "transparent"}` }}>
-          <Icon name="folder-git-2" size={13} color={r.status === "failed" ? "var(--di-neg)" : i === 0 ? "var(--di-spot)" : "var(--di-info)"} />
-          <span style={{ flex: 1, minWidth: 0 }}>
-            <span className="di-mono" style={{ display: "block", fontSize: 11.5, color: "var(--di-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.repo}</span>
-            <span style={{ display: "block", fontSize: 9.5, color: r.status === "failed" ? "var(--di-neg)" : "#6f8296", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              {r.status === "failed" ? (r.error ?? "clone failed") : `${r.branch ?? "default branch"}${i === 0 ? " · primary" : ""}`}
-            </span>
-          </span>
-          {i > 0 && (
-            <button className="di-btn" aria-label={`Remove ${r.repo}`} title="Remove from session" disabled={busy !== null}
-              onClick={() => void run(r.name, () => p.onRemoveRepo(r.name))}
-              style={{ border: 0, background: "transparent", cursor: busy ? "default" : "pointer", padding: 2, display: "flex", opacity: busy === r.name ? 0.4 : 1 }}>
-              <Icon name="x" size={13} color="var(--di-ink-mute)" />
-            </button>
-          )}
+
+      {p.repos.map((r, i) => {
+        const failed = r.status === "failed";
+        return (
+          <div key={r.name}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 9px", borderRadius: 9, marginBottom: 3,
+              background: i === 0 ? "#0e2032" : "transparent",
+              border: `1px solid ${failed ? "#4a2b2b" : i === 0 ? "#1d3b4f" : "transparent"}`, opacity: busy === r.name ? 0.45 : 1 }}>
+              <Icon name={failed ? "alert-triangle" : i === 0 ? "square-terminal" : "folder-git-2"} size={13}
+                color={failed ? "var(--di-neg)" : i === 0 ? "var(--di-spot)" : "var(--di-info)"} />
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span className="di-mono" style={{ display: "block", fontSize: 11.5, color: "var(--di-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.repo}</span>
+                <span style={{ display: "block", fontSize: 9.5, color: failed ? "var(--di-neg)" : "#6f8296", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {failed ? `clone failed · ${r.error ?? "unknown reason"}` : `${r.branch ?? "default branch"}${i === 0 ? " · the agent works here" : ""}`}
+                </span>
+              </span>
+              {failed ? (
+                <>
+                  <button className="di-btn" onClick={() => void add(r.repo)} style={{ flex: "0 0 auto", height: 24, padding: "0 9px", border: "1px solid #2c5075", borderRadius: 7, background: "transparent", color: "var(--di-ink-soft)", fontFamily: "inherit", fontSize: 10.5, cursor: "pointer" }}>Try again</button>
+                  <button className="di-btn" onClick={() => void remove(r)} style={{ flex: "0 0 auto", height: 24, padding: "0 9px", border: "1px solid #24384f", borderRadius: 7, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 10.5, cursor: "pointer" }}>Remove</button>
+                </>
+              ) : i > 0 && (
+                <button className="di-btn" aria-label={`Remove ${r.repo}`} title="Remove from session" disabled={busy !== null}
+                  onClick={() => setConfirm(r)}
+                  style={{ flex: "0 0 auto", border: 0, background: "transparent", cursor: "pointer", padding: 2, display: "flex" }}>
+                  <Icon name="trash-2" size={13} color="var(--di-ink-mute)" />
+                </button>
+              )}
+            </div>
+
+            {/* Removal deletes a checkout and anything uncommitted in it —
+                that is stated, not implied by a bare × (44c). */}
+            {confirm?.name === r.name && (
+              <div style={{ border: "1px solid #4a2b2b", borderRadius: 10, background: "#160e0e", padding: "10px 11px", margin: "0 0 6px" }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--di-ink)", marginBottom: 4 }}>Remove {r.name}?</div>
+                <div style={{ fontSize: 11, color: "#c9a0a0", lineHeight: 1.5, marginBottom: 9 }}>
+                  Deletes the checkout from disk, including anything uncommitted in it. Nothing is pushed first.
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button className="di-btn" onClick={() => setConfirm(null)} style={{ flex: 1, height: 30, border: "1px solid var(--di-rule)", borderRadius: 8, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 11.5, cursor: "pointer" }}>Keep it</button>
+                  <button className="di-btn" onClick={() => void remove(r)} style={{ flex: 1, height: 30, border: 0, borderRadius: 8, background: "var(--di-neg)", color: "#2a1010", fontFamily: "inherit", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>Remove and delete</button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Real progress, with the elapsed time and permission to walk away. */}
+      {cloning && (
+        <div style={{ border: "1px solid #24485f", borderRadius: 9, background: "#0c1e30", padding: "8px 9px", marginBottom: 3 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 6 }}>
+            <Icon name="folder-git-2" size={13} color="var(--di-info)" />
+            <span className="di-mono" style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: "var(--di-ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cloning.repo}</span>
+            <span className="di-mono" style={{ fontSize: 10, color: "#6f8296" }}>{elapsed}s</span>
+          </div>
+          <div style={{ height: 3, borderRadius: 999, background: "#12283f", overflow: "hidden", marginBottom: 5 }}>
+            <div style={{ width: "45%", height: "100%", background: "var(--di-info)", animation: "di-pulse 1.6s infinite" }} />
+          </div>
+          <div style={{ fontSize: 10, color: "#6f8296", lineHeight: 1.4 }}>Cloning — this can take a few minutes. You can keep working.</div>
         </div>
-      ))}
+      )}
 
       {error && <div style={{ fontSize: 10.5, color: "var(--di-neg)", padding: "4px 5px", lineHeight: 1.45 }}>{error}</div>}
 
-      {p.repos.length < MAX_REPOS && (adding ? (
+      {total < MAX_REPOS && !cloning && (adding ? (
         <div style={{ marginTop: 4 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, height: 34, padding: "0 10px", border: "1px solid #2c5075", borderRadius: 8, background: "#0a1c2e" }}>
             <Icon name="search" size={13} color="var(--di-info)" />
             <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} spellCheck={false}
-              disabled={busy !== null}
-              onKeyDown={(e) => { if (e.key === "Enter" && matches[0]) void run(matches[0], () => p.onAddRepo(matches[0], null)); if (e.key === "Escape") setAdding(false); }}
-              placeholder={busy ? "Cloning…" : "owner/repo"}
+              onKeyDown={(e) => { if (e.key === "Enter" && matches[0]) void add(matches[0]); if (e.key === "Escape") setAdding(false); }}
+              placeholder="owner/repo" aria-label="Add repository"
               className="di-mono" style={{ flex: 1, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 11.5 }} />
           </div>
           {matches.map((m) => (
-            <button key={m} className="di-row di-btn" disabled={busy !== null} onClick={() => void run(m, () => p.onAddRepo(m, null))}
+            <button key={m} className="di-row di-btn" onClick={() => void add(m)}
               style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 10px", borderRadius: 8, border: 0, background: "transparent", cursor: "pointer", marginTop: 2 }}>
               <Icon name="plus" size={12} color="var(--di-info)" />
               <span className="di-mono" style={{ fontSize: 11, color: "var(--di-ink-soft)", flex: 1, minWidth: 0, textAlign: "left", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m}</span>

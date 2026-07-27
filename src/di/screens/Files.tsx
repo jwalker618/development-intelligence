@@ -22,6 +22,8 @@ export function FilesScreen({ trees, repos, sessionId }: { trees: TreeNode[]; re
   const [dialog, setDialog] = useState<Dialog>(null);
 
   const multi = trees.length > 1;
+  const [current, setCurrent] = useState(0);
+  const [find, setFind] = useState("");
   const openFile = (t: Target) => {
     setSelected(t); setEditing(false); setFile(null); setLoadingFile(true);
     void api.file(sessionId, t.path, t.repo).then((f) => setFile(f)).catch(() => setFile(null)).finally(() => setLoadingFile(false));
@@ -64,24 +66,20 @@ export function FilesScreen({ trees, repos, sessionId }: { trees: TreeNode[]; re
   };
 
   const ready = repos.filter((r) => r.status === "ready");
-  trees.forEach((root, i) => {
-    // Slot 0 is the primary — its `repo` stays undefined so single-repo sessions
-    // send exactly the requests they always did.
-    const repo = i === 0 ? undefined : ready[i]?.name;
-    const keyPrefix = `${i}:`;
-    const rootOpen = open[`${keyPrefix}__root`] ?? true;
-    rows.push(
-      <div key={`${keyPrefix}__root`} className="di-btn"
-        onClick={() => multi && setOpen((o) => ({ ...o, [`${keyPrefix}__root`]: !rootOpen }))}
-        style={{ display: "flex", alignItems: "center", gap: 7, padding: "6px 8px", marginTop: i ? 10 : 0, color: "var(--di-ink)", fontWeight: 600, border: 0, background: "transparent", cursor: multi ? "pointer" : "default", width: "100%" }}>
-        <Icon name={rootOpen ? "chevron-down" : "chevron-right"} size={13} color="var(--di-ink-mute)" />
-        <Icon name="folder-git-2" size={14} color={i === 0 ? "var(--di-spot)" : "var(--di-info)"} />
-        <span style={{ flex: 1, minWidth: 0, textAlign: "left", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{root.name}</span>
-        {multi && i === 0 && <span className="di-eyebrow" style={{ fontSize: 9, color: "var(--di-spot)" }}>primary</span>}
-      </div>,
-    );
-    if (rootOpen) walk(root, repo, keyPrefix);
-  });
+  // Stacked roots stop scaling past two, so one tree at a time with a repo chip
+  // strip above it (44e). Single-repo sessions never see the strip.
+  const root = trees[current] ?? trees[0];
+  const repo = current === 0 ? undefined : ready[current]?.name;
+  if (root) {
+    const keyPrefix = `${current}:`;
+    walk(root, repo, keyPrefix);
+  }
+
+  // Which OTHER checkouts have something to look at. "Elsewhere" is the answer
+  // to "did I miss something in another repo" without stacking every tree.
+  const elsewhere = ready
+    .map((r, i) => ({ r, i }))
+    .filter(({ i }) => i !== current && (trees[i]?.children.length ?? 0) > 0);
 
   return (
     <>
@@ -95,13 +93,55 @@ export function FilesScreen({ trees, repos, sessionId }: { trees: TreeNode[]; re
             </button>
           ))}
         </div>
+        {/* One tree at a time (44e). The strip scrolls; the primary is marked
+            with the terminal glyph, not a badge. */}
+        {multi && (
+          <>
+            <div className="di-scroll" style={{ display: "flex", gap: 5, overflowX: "auto", padding: "0 2px 9px" }}>
+              {ready.map((r, i) => {
+                const on = i === current;
+                return (
+                  <button key={r.name} className="di-btn" onClick={() => setCurrent(i)}
+                    style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", gap: 6, height: 28, padding: "0 11px", borderRadius: 999,
+                      border: `1px solid ${on ? "var(--di-rule-strong)" : "#1a2a3a"}`, background: on ? "#12283f" : "transparent",
+                      color: on ? "var(--di-ink)" : "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 11, cursor: "pointer" }}>
+                    {i === 0 && <Icon name="square-terminal" size={11} color={on ? "var(--di-spot)" : "#3e5670"} />}
+                    {r.name}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 7, height: 30, padding: "0 10px", marginBottom: 9, border: "1px solid var(--di-rule)", borderRadius: 8, background: "transparent" }}>
+              <Icon name="search" size={12} color="var(--di-ink-mute)" />
+              <input value={find} onChange={(e) => setFind(e.target.value)} spellCheck={false}
+                placeholder={`Find in all ${ready.length} repos`} aria-label="Find in all repos"
+                className="di-mono" style={{ flex: 1, minWidth: 0, border: 0, background: "transparent", outline: "none", color: "var(--di-ink)", fontSize: 11 }} />
+            </div>
+          </>
+        )}
         {trees.length === 0 && [70, 55, 80, 48, 62, 75, 52].map((w, i) => (
           <div key={i} style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 12, paddingLeft: (i % 3) * 14 }}>
             <div style={{ width: 13, height: 13, borderRadius: 3, background: "#12283f", opacity: 0.6, animation: "di-pulse 1.6s infinite" }} />
             <div style={{ width: `${w}%`, height: 11, borderRadius: 6, background: "#12283f", opacity: 0.6, animation: "di-pulse 1.6s infinite" }} />
           </div>
         ))}
-        {rows}
+        {find.trim() ? <FindResults trees={trees} ready={ready} query={find} onOpen={openFile} /> : rows}
+
+        {/* Which other checkouts have files worth a look — without stacking
+            every tree into one column. */}
+        {!find.trim() && multi && elsewhere.length > 0 && (
+          <div style={{ marginTop: 14, paddingTop: 11, borderTop: "1px solid var(--di-rule)" }}>
+            <div className="di-eyebrow" style={{ fontSize: 9, fontFamily: "var(--di-font-sans)", marginBottom: 7, padding: "0 4px" }}>Elsewhere</div>
+            {elsewhere.map(({ r, i }) => (
+              <button key={r.name} className="di-row di-btn" onClick={() => setCurrent(i)}
+                style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "6px 8px", borderRadius: 7, border: 0, background: "transparent", cursor: "pointer" }}>
+                <Icon name="folder-git-2" size={12} color="var(--di-info)" />
+                <span style={{ flex: 1, minWidth: 0, textAlign: "left", fontSize: 11, color: "var(--di-ink-soft)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.name}</span>
+                <Icon name="chevron-right" size={12} color="#3e5670" />
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <MainColumn style={{ background: "var(--di-canvas)" }}>
@@ -113,9 +153,15 @@ export function FilesScreen({ trees, repos, sessionId }: { trees: TreeNode[]; re
           <>
             <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 9, padding: "12px 20px", borderBottom: "1px solid var(--di-rule)", background: "var(--di-panel-alt)" }}>
               <Icon name={editing ? "file-pen-line" : "file-code-2"} size={15} color={editing ? "var(--di-warn)" : "var(--di-ink-mute)"} />
+              {/* Prefix in ink-mute against the ink filename; the working
+                  directory's own files stay unprefixed and are qualified in
+                  words instead (49e). */}
               <span className="di-mono" style={{ fontSize: 11, color: "var(--di-ink)" }}>
-                {selected.repo && <span style={{ color: "var(--di-info)" }}>{selected.repo}/</span>}{selected.path}
+                {selected.repo && <span style={{ color: "#5a6b7d" }}>{selected.repo}/</span>}{selected.path}
               </span>
+              {multi && !selected.repo && (
+                <span style={{ fontSize: 10.5, color: "#6f8296" }}>in the working directory</span>
+              )}
               {editing && draft !== file?.content && <span style={{ display: "inline-flex", alignItems: "center", height: 20, padding: "0 9px", borderRadius: 999, background: "#1a1206", border: "1px solid #5a3316", fontSize: 10, color: "var(--di-warn)" }}>unsaved</span>}
               <div style={{ flex: 1 }} />
               {file && !file.binary && !editing && (
@@ -159,6 +205,39 @@ export function FilesScreen({ trees, repos, sessionId }: { trees: TreeNode[]; re
       </MainColumn>
 
       {dialog && <AddDialog dialog={dialog} sessionId={sessionId} onClose={() => setDialog(null)} onCreated={(p) => { setDialog(null); openFile({ repo: dialog.repo, path: p }); }} />}
+    </>
+  );
+}
+
+/** Find across every checkout at once — the answer to "which repo was that
+ *  file in", which one tree at a time otherwise makes harder. */
+function FindResults({ trees, ready, query, onOpen }: {
+  trees: TreeNode[]; ready: RepoRef[]; query: string; onOpen: (t: Target) => void;
+}) {
+  const q = query.trim().toLowerCase();
+  const hits: Array<{ repo?: string; repoName: string; path: string }> = [];
+  trees.forEach((root, i) => {
+    const repo = i === 0 ? undefined : ready[i]?.name;
+    const repoName = ready[i]?.name ?? root.name;
+    const walk = (n: TreeNode) => {
+      if (hits.length >= 60) return;
+      if (n.kind === "file" && n.path.toLowerCase().includes(q)) hits.push({ repo, repoName, path: n.path });
+      n.children.forEach(walk);
+    };
+    walk(root);
+  });
+  if (!hits.length) return <div style={{ fontSize: 11, color: "#6f8296", padding: "6px 8px" }}>Nothing matching in any checkout.</div>;
+  return (
+    <>
+      {hits.map((h) => (
+        <button key={`${h.repoName}/${h.path}`} className="di-row di-btn" onClick={() => onOpen({ repo: h.repo, path: h.path })}
+          style={{ display: "flex", alignItems: "center", gap: 7, width: "100%", padding: "5px 8px", borderRadius: 6, border: 0, background: "transparent", cursor: "pointer" }}>
+          <Icon name="file-code-2" size={12} color="#7f9bb5" />
+          <span style={{ flex: 1, minWidth: 0, textAlign: "left", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--di-ink-soft)" }}>
+            <span style={{ color: "#5a6b7d" }}>{h.repoName}/</span>{h.path}
+          </span>
+        </button>
+      ))}
     </>
   );
 }

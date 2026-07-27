@@ -20,6 +20,9 @@ export interface Live {
   tree: TreeNode | null;
   /** Checkouts in this session, primary first. Empty until the session loads. */
   repos: RepoRef[];
+  /** Per-repo state while a Commit & sync runs, so the pre-flight in 44f shows
+   *  what is actually happening rather than a single spinner. Null when idle. */
+  syncing: Record<string, SyncState> | null;
   activeDiff: { path: string; repo?: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null;
   cavemanSavings: string | null;
   /** The CLI's own view of this session: context meter, account, inventories.
@@ -61,6 +64,8 @@ export interface Actions {
   refresh: () => void;
 }
 
+export type SyncState = "pushing" | "waiting" | "done" | "failed";
+
 const is401 = (e: unknown) => e instanceof Error && /\b401\b/.test(e.message);
 
 /** Live data for one session (chosen by the app). Also lists all sessions for
@@ -74,6 +79,7 @@ export function useControl(sessionId: string | null): Live {
   });
   const [trees, setTrees] = useState<TreeNode[]>([]);
   const [repos, setRepos] = useState<RepoRef[]>([]);
+  const [syncing, setSyncing] = useState<Record<string, SyncState> | null>(null);
   const [activeDiff, setActiveDiff] = useState<{ path: string; repo?: string; hunks: Hunk[]; moves: Move[]; truncated: boolean; binary: boolean } | null>(null);
   const [cavemanSavings, setCavemanSavings] = useState<string | null>(null);
   const [models, setModels] = useState<ModelRow[] | null>(null);
@@ -240,19 +246,34 @@ export function useControl(sessionId: string | null): Live {
       if (!sessionId) return;
       const dirty = new Set(state.changes.filter((c) => c.kind !== "approval").map((c) => c.repo));
       const targets = dirty.size ? [...dirty] : [undefined];
+      // Name every target up front so the pre-flight can show "waiting" for the
+      // ones that have not started — a queue the reviewer can see.
+      const nameOf = (r: string | undefined) => r ?? repos[0]?.name ?? "repo";
+      setSyncing(Object.fromEntries(targets.map((r) => [nameOf(r), "waiting" as SyncState])));
       void (async () => {
         const failures: string[] = [];
         // Sequential: these are pushes to the same remote host, and a partial
         // failure must name the repo that failed rather than a merged rejection.
         for (const repo of targets) {
-          try { await api.gitOp(sessionId, { op: "sync" }, repo); }
-          catch (e) {
-            if (is401(e)) { setConn("reauth"); return; }
-            failures.push(`${repo ?? repos[0]?.name ?? "repo"}: ${e instanceof Error ? e.message : String(e)}`);
+          const name = nameOf(repo);
+          setSyncing((p) => ({ ...p, [name]: "pushing" }));
+          try {
+            await api.gitOp(sessionId, { op: "sync" }, repo);
+            setSyncing((p) => ({ ...p, [name]: "done" }));
+          } catch (e) {
+            setSyncing((p) => ({ ...p, [name]: "failed" }));
+            if (is401(e)) { setConn("reauth"); setSyncing(null); return; }
+            failures.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+            // The design states the rule and the UI must honour it: one repo at
+            // a time, and the rest stop when one fails.
+            break;
           }
         }
         await loadSession(sessionId);
         setError(failures.length ? failures.join(" · ") : null);
+        // Leave the outcome up briefly so a failure is readable before the
+        // dock collapses back to its idle state.
+        setTimeout(() => setSyncing(null), failures.length ? 6000 : 1200);
       })();
     },
     selectChange: (path, repo) => {
@@ -337,7 +358,7 @@ export function useControl(sessionId: string | null): Live {
     refresh: () => { if (sessionId) void loadSession(sessionId); },
   };
 
-  return { state, sessions, chat, models, usage, trees, tree: trees[0] ?? null, repos, activeDiff, cavemanSavings, status, sample: SAMPLE, conn, error, actions };
+  return { state, sessions, chat, models, usage, trees, tree: trees[0] ?? null, repos, syncing, activeDiff, cavemanSavings, status, sample: SAMPLE, conn, error, actions };
 }
 
 function foldOne(ev: { kind?: string; [k: string]: unknown }): ChatMsg[] {
