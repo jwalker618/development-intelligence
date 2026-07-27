@@ -30,7 +30,7 @@ function activeRow(rows: ModelRow[] | null, model: string | null, active: string
 }
 
 export function SessionScreen({
-  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, usage, status, onModel, onEffort, onRefreshModels, onPermissionMode, onReadOnly, onBudget, onMaxTurns, onPreviewRewind, onRewind, onAddPin, onRemovePin, onSearch,
+  s, chat, cavemanSavings, sample, claudeConnected, onConnect, onCaveman, onSend, onApproval, onInterrupt, models, usage, status, onModel, onEffort, onRefreshModels, onPermissionMode, onReadOnly, onBudget, onMaxTurns, onOpenDiagnostics, onPreviewRewind, onRewind, onAddPin, onRemovePin, onSearch,
 }: {
   s: SessionState;
   chat: ChatState;
@@ -52,6 +52,8 @@ export function SessionScreen({
   onReadOnly: (on: boolean) => void;
   onBudget: (usd: number | null) => void;
   onMaxTurns: (t: number | null) => void;
+  /** Opens Settings on Diagnostics — what a hook Notice row points at. */
+  onOpenDiagnostics: () => void;
   onPreviewRewind: (uuid: string) => Promise<RewindResult>;
   onRewind: (uuid: string) => Promise<RewindResult>;
   onAddPin: (icon: string, label: string) => void;
@@ -62,6 +64,8 @@ export function SessionScreen({
   const [pinDraft, setPinDraft] = useState("");
   const [addingPin, setAddingPin] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  // Lifted so a Blocked transcript row can open the very control it names.
+  const [leashOpen, setLeashOpen] = useState(false);
 
   // ⌘K / Ctrl-K opens transcript search.
   useEffect(() => {
@@ -185,6 +189,8 @@ export function SessionScreen({
             onReadOnly={onReadOnly}
             onBudget={onBudget}
             onMaxTurns={onMaxTurns}
+            open={leashOpen}
+            onOpen={setLeashOpen}
           />
           {/* Model and effort are ONE chip. Merging them is what makes the
               header fit — five controls do not survive a 390px row (43c). */}
@@ -193,7 +199,7 @@ export function SessionScreen({
 
         {claudeConnected === false
           ? <NotConnected onConnect={onConnect} />
-          : <ChatBody chat={chat} onApproval={onApproval} onSend={onSend} onPreviewRewind={onPreviewRewind} onRewind={onRewind} />}
+          : <ChatBody chat={chat} onApproval={onApproval} onSend={onSend} onPreviewRewind={onPreviewRewind} onRewind={onRewind} onOpenLeash={() => setLeashOpen(true)} onOpenDiagnostics={onOpenDiagnostics} />}
 
         {claudeConnected !== false && chat.messages.length > 0 && (
           <Composer onSend={onSend} suggestion={!chat.busy ? chat.suggestion : null} />
@@ -226,12 +232,15 @@ const STARTERS = ["Explain this repo", "Add a failing test", "Fix the pending fi
  *  that does not exist yet, or on DI's own surfaces. */
 const CHIP_SKIP = /^(help|clear|exit|quit|compact|usage|cost|stats|resume|logout|login|config|status|doctor|upgrade|release-notes|bug|feedback|privacy|terms|vim|theme|model|memory)$/i;
 
-function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind }: {
+function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind, onOpenLeash, onOpenDiagnostics }: {
   chat: ChatState;
   onApproval: (id: string, d: "allow" | "always" | "deny" | "stop", input?: Record<string, unknown>) => void;
   onSend: (t: string) => void;
   onPreviewRewind: (uuid: string) => Promise<RewindResult>;
   onRewind: (uuid: string) => Promise<RewindResult>;
+  /** A blocked row names the thing you would go and change. */
+  onOpenLeash: () => void;
+  onOpenDiagnostics: () => void;
 }) {
   // Real slash commands when the CLI has told us what this repo has; the
   // hardcoded trio only while it hasn't.
@@ -282,47 +291,26 @@ function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind }: {
             </div>
           </div>
         );
-        // Auto-denied by a rule, mode or classifier — canUseTool was never
-        // called, so without this row the agent just looks like it gave up.
+        // ── the system register (45c) ──
+        // Two voices, split by whether the row wants something from you.
         if (m.role === "denied") return (
-          <div key={m.id} style={{ width: "100%", maxWidth: 520, display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", border: "1px solid #4a2b2b", borderRadius: 9, background: "#1a1010" }}>
-            <Icon name="shield-off" size={13} color="var(--di-neg)" />
-            <span className="di-mono" style={{ fontSize: 11, color: "#e2a5a5" }}>
-              blocked · {m.text}
-            </span>
-            <span style={{ flex: 1 }} />
-            <span style={{ fontSize: 10, color: "#8a6a6a" }}>{m.level}</span>
-          </div>
+          <SystemNeedsYou key={m.id} kind="Blocked" tone="var(--di-neg)" bg="#160e0e" border="#4a2b2b"
+            subject={m.text} detail={m.level ?? "blocked"}
+            action={{ label: "Change the leash", onClick: onOpenLeash }} />
         );
-        // A banner from the loop — most often a hook's block reason, which used
-        // to vanish and leave a prompt that appeared to do nothing.
         if (m.role === "notice") {
-          const warn = m.level === "warning" || m.stops;
+          const halted = !!m.stops;
+          const warn = halted || m.level === "warning";
           return (
-            <div key={m.id} style={{ width: "100%", maxWidth: 560, display: "flex", gap: 8, padding: "9px 12px", border: `1px solid ${warn ? "#5a3316" : "#24384f"}`, borderRadius: 9, background: warn ? "#1a1206" : "#101a24" }}>
-              <Icon name={warn ? "alert-triangle" : "info"} size={13} color={warn ? "var(--di-warn)" : "var(--di-ink-mute)"} style={{ flex: "0 0 auto", marginTop: 2 }} />
-              <span style={{ fontSize: 11.5, lineHeight: 1.5, color: warn ? "#e8c9a0" : "#93a4b5", whiteSpace: "pre-wrap" }}>
-                {m.text}{m.stops ? " · the turn stopped here" : ""}
-              </span>
-            </div>
+            <SystemNeedsYou key={m.id} kind="Notice" tone={warn ? "var(--di-warn)" : "#5a6b7d"}
+              bg={warn ? "#160f06" : "#0e1620"} border={warn ? "#4a3316" : "#22303f"}
+              subject={m.text} detail={halted ? "the turn stopped here" : null}
+              action={warn ? { label: "See the hook", onClick: onOpenDiagnostics } : null} />
           );
         }
-        // A receipt for an undo that actually happened.
-        if (m.role === "rewound") return (
-          <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "2px 0" }}>
-            <span style={{ flex: 1, height: 1, background: "#3a2a1a" }} />
-            <span className="di-mono" style={{ fontSize: 10, color: "var(--di-warn)" }}>{m.text}</span>
-            <span style={{ flex: 1, height: 1, background: "#3a2a1a" }} />
-          </div>
-        );
-        // Compaction silently changes what the agent remembers. Mark it.
-        if (m.role === "compacted") return (
-          <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "2px 0" }}>
-            <span style={{ flex: 1, height: 1, background: "#2a3a49" }} />
-            <span className="di-mono" style={{ fontSize: 10, color: "#6f8296" }}>{m.text}</span>
-            <span style={{ flex: 1, height: 1, background: "#2a3a49" }} />
-          </div>
-        );
+        // Something HAPPENED: a rule through the column, no box, no action.
+        if (m.role === "compacted") return <SystemHappened key={m.id} text={m.text} tone="#3e5670" ink="#6f8296" />;
+        if (m.role === "rewound") return <SystemHappened key={m.id} text={m.text} tone="#4a3316" ink="var(--di-warn)" />;
         // approval — a review instrument, not a yes/no prompt
         const pending = chat.pendingApprovalId === m.approvalId;
         return <ApprovalCard key={m.id} m={m} pending={pending} onApproval={onApproval} />;
@@ -332,15 +320,15 @@ function ChatBody({ chat, onApproval, onSend, onPreviewRewind, onRewind }: {
 }
 
 /**
- * A user message, with the one undo DI has.
+ * A user message, and the one undo DI has (45a / 45b).
  *
- * "Rewind here" restores every file the agent changed SINCE this message. It
- * is a two-step: a dry run reports the file count and line delta, and only
- * then does the confirm touch disk — the same shape as the typed-challenge
- * gate elsewhere, scaled to the blast radius.
+ * The preview is not a popover: it is a FULL-COLUMN receipt inside the
+ * transcript, amber, with the blast radius as three tabular figures. A
+ * destructive action with this reach earns the column; a modal would be too
+ * much for an undo and a tooltip too little.
  *
- * The transcript does NOT rewind with the files. There is no counterpart in
- * the SDK, so the card says so rather than implying the conversation moved.
+ * The line about the conversation not moving is non-negotiable copy — the
+ * transcript does not rewind with the files and the SDK offers no counterpart.
  */
 function UserBubble({ m, onPreviewRewind, onRewind }: {
   m: ChatMsg;
@@ -350,6 +338,7 @@ function UserBubble({ m, onPreviewRewind, onRewind }: {
   const [preview, setPreview] = useState<RewindResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
+  const [showAll, setShowAll] = useState(false);
 
   const ask = () => {
     if (!m.uuid) return;
@@ -365,52 +354,130 @@ function UserBubble({ m, onPreviewRewind, onRewind }: {
   };
 
   return (
-    <div style={{ alignSelf: "flex-end", maxWidth: "70%", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
-      <div style={{ background: "#1c2836", border: "1px solid #2a3a49", borderRadius: "12px 12px 4px 12px", padding: "10px 13px", fontSize: 12.5, lineHeight: 1.5, color: "#dbe3ec", whiteSpace: "pre-wrap" }}>{m.text}</div>
+    <>
+      <div style={{ alignSelf: "flex-end", maxWidth: "70%", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+        <div style={{ background: "#1c2836", border: "1px solid #2a3a49", borderRadius: "12px 12px 4px 12px", padding: "10px 13px", fontSize: 12.5, lineHeight: 1.5, color: "#dbe3ec", whiteSpace: "pre-wrap" }}>{m.text}</div>
+        {/* Only messages we stamped can be rewound to. Older transcripts have
+            no anchor, and the affordance is absent rather than dead. */}
+        {m.uuid && !done && !preview && (
+          <button className="di-btn" onClick={ask} disabled={busy}
+            style={{ border: 0, background: "transparent", color: "#586573", fontFamily: "inherit", fontSize: 10.5, cursor: "pointer", padding: "0 2px" }}>
+            {busy ? "checking…" : "rewind here"}
+          </button>
+        )}
+      </div>
 
-      {/* Only messages we stamped can be rewound to — older transcripts have
-          no anchor, and offering a dead button would be worse than none. */}
-      {m.uuid && !done && !preview && (
-        <button className="di-btn" onClick={ask} disabled={busy}
-          style={{ border: 0, background: "transparent", color: "#586573", fontFamily: "inherit", fontSize: 10.5, cursor: "pointer", padding: "0 2px" }}>
-          {busy ? "checking…" : "↩ rewind here"}
-        </button>
-      )}
-
-      {preview && (
-        <div style={{ width: 280, border: `1px solid ${preview.canRewind ? "#5a3316" : "#3a4653"}`, borderRadius: 10, background: preview.canRewind ? "#1a1206" : "#141d26", padding: "10px 12px" }}>
-          {preview.canRewind ? (
-            <>
-              <div style={{ fontSize: 11.5, color: "#e8c9a0", lineHeight: 1.5, marginBottom: 8 }}>
-                Restores <b>{preview.filesChanged?.length ?? 0}</b> file{(preview.filesChanged?.length ?? 0) === 1 ? "" : "s"}
-                {" "}(<span style={{ color: "var(--di-pos)" }}>+{preview.insertions ?? 0}</span>{" "}
-                <span style={{ color: "var(--di-neg)" }}>−{preview.deletions ?? 0}</span>) to their state before this message.
-                The conversation stays as it is — only files move.
+      {preview && (preview.canRewind ? (
+        <div style={{ width: "100%", border: "1px solid #5a3316", borderRadius: 13, background: "#160f0a", overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "14px 16px 0" }}>
+            <span style={{ flex: "0 0 auto", width: 34, height: 34, borderRadius: 10, background: "#2a1a0c", border: "1px solid #5a3316", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Icon name="undo-2" size={16} color="var(--di-warn)" />
+            </span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--di-ink)", marginBottom: 3 }}>Put the files back to before this message</div>
+              <div style={{ fontSize: 12, color: "#c9b18a", lineHeight: 1.5 }}>
+                The conversation stays exactly as it is. Only files move — there is no counterpart for the transcript.
               </div>
-              {!!preview.filesChanged?.length && (
-                <div className="di-mono" style={{ fontSize: 9.5, color: "#a08a5e", lineHeight: 1.6, marginBottom: 9, maxHeight: 60, overflowY: "auto" }}>
-                  {preview.filesChanged.slice(0, 6).map((f) => <div key={f}>{f.split("/").slice(-2).join("/")}</div>)}
-                  {preview.filesChanged.length > 6 && <div>… {preview.filesChanged.length - 6} more</div>}
-                </div>
-              )}
-              <div style={{ display: "flex", gap: 6 }}>
-                <button className="di-btn" onClick={() => setPreview(null)}
-                  style={{ flex: 1, height: 30, border: "1px solid var(--di-rule)", borderRadius: 8, background: "transparent", color: "var(--di-ink-mute)", fontFamily: "inherit", fontSize: 11.5, cursor: "pointer" }}>Cancel</button>
-                <button className="di-btn" onClick={confirm} disabled={busy}
-                  style={{ flex: 1, height: 30, border: 0, borderRadius: 8, background: "var(--di-warn)", color: "#1a1206", fontFamily: "inherit", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
-                  {busy ? "Restoring…" : "Restore files"}
-                </button>
-              </div>
-            </>
-          ) : (
-            <div style={{ fontSize: 11, color: "#8fa6b5", lineHeight: 1.5 }}>
-              Can't rewind to here — {preview.error ?? "no checkpoint"}.
-              <button className="di-btn" onClick={() => setPreview(null)}
-                style={{ marginLeft: 6, border: 0, background: "transparent", color: "var(--di-info)", fontFamily: "inherit", fontSize: 11, cursor: "pointer", padding: 0 }}>dismiss</button>
             </div>
-          )}
+          </div>
+
+          {/* The blast radius as three tabular figures, not a sentence. */}
+          <div style={{ display: "flex", gap: 30, padding: "13px 16px 12px 62px" }}>
+            <Figure label="Files" value={String(preview.filesChanged?.length ?? 0)} tone="var(--di-ink)" />
+            <Figure label="Added back" value={`+${preview.insertions ?? 0}`} tone="var(--di-pos)" />
+            <Figure label="Taken away" value={`−${preview.deletions ?? 0}`} tone="var(--di-neg)" />
+          </div>
+
+          <FileRollup files={preview.filesChanged ?? []} showAll={showAll} onShowAll={() => setShowAll(true)} />
+
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px 14px", borderTop: "1px solid #3a2a1a" }}>
+            <button className="di-btn" onClick={confirm} disabled={busy}
+              style={{ flex: "0 0 auto", height: 38, padding: "0 20px", border: 0, borderRadius: 10, background: "var(--di-warn)", color: "#1a1206", fontFamily: "inherit", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+              {busy ? "Restoring…" : "Restore these files"}
+            </button>
+            <button className="di-btn" onClick={() => setPreview(null)}
+              style={{ flex: "0 0 auto", height: 38, padding: "0 16px", border: "1px solid var(--di-rule-strong)", borderRadius: 10, background: "transparent", color: "var(--di-ink-soft)", fontFamily: "inherit", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+              Cancel
+            </button>
+            <span style={{ flex: 1 }} />
+            {/* Two facts the reviewer needs before pressing: nothing has moved
+                yet, and there is no way back from this one. */}
+            <span style={{ fontSize: 11, color: "#a08a5e", textAlign: "right", lineHeight: 1.45 }}>
+              Dry run · nothing has moved yet<br />There is no undo for this
+            </span>
+          </div>
+          {/* Everything below this point in the transcript is untouched —
+              worth saying, because a "rewind" that moved messages would be a
+              very different and much larger promise (45a). */}
+          <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "0 16px 12px" }}>
+            <span style={{ flex: 1, height: 1, background: "#3a2a1a" }} />
+            <span className="di-mono" style={{ fontSize: 9.5, color: "#7a6440" }}>later messages stay put</span>
+            <span style={{ flex: 1, height: 1, background: "#3a2a1a" }} />
+          </div>
         </div>
-      )}
+      ) : (
+        /* No checkpoint is a plain statement, not an error — the message may
+           simply predate the feature (45b). */
+        <div style={{ width: "100%", border: "1px solid var(--di-rule)", borderRadius: 12, background: "var(--di-surface)", padding: "13px 15px" }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--di-ink-soft)", marginBottom: 3 }}>Nothing to restore</div>
+          <div style={{ fontSize: 11.5, color: "#6f8296", lineHeight: 1.5 }}>
+            {preview.error ?? "No file checkpoint was kept for this message."}
+            <button className="di-btn" onClick={() => setPreview(null)}
+              style={{ marginLeft: 7, border: 0, background: "transparent", color: "var(--di-info)", fontFamily: "inherit", fontSize: 11.5, cursor: "pointer", padding: 0 }}>dismiss</button>
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function Figure({ label, value, tone }: { label: string; value: string; tone: string }) {
+  return (
+    <div>
+      <div className="di-eyebrow" style={{ fontSize: 8.5, color: "#a08a5e", marginBottom: 2 }}>{label}</div>
+      <div className="di-mono" style={{ fontSize: 19, fontWeight: 600, color: tone, letterSpacing: "-0.02em" }}>{value}</div>
+    </div>
+  );
+}
+
+/**
+ * The file list, folded to folders with counts past a readable length (45a).
+ *
+ * A 28-file rewind is a folder-shaped fact, not 28 lines the reviewer will
+ * read. "See all" is one tap away for when it is not.
+ */
+function FileRollup({ files, showAll, onShowAll }: { files: string[]; showAll: boolean; onShowAll: () => void }) {
+  if (!files.length) return null;
+  const FOLD_AT = 8;
+  const short = (f: string) => f.split("/").slice(-2).join("/");
+  if (showAll || files.length <= FOLD_AT) {
+    return (
+      <div className="di-scroll" style={{ padding: "0 16px 12px 62px", maxHeight: 240, overflowY: "auto" }}>
+        {files.map((f) => (
+          <div key={f} className="di-mono" style={{ fontSize: 11, color: "#a08a5e", lineHeight: 1.75, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{short(f)}</div>
+        ))}
+      </div>
+    );
+  }
+  const byDir = new Map<string, number>();
+  for (const f of files) {
+    const dir = f.split("/").slice(0, -1).slice(-2).join("/") || "/";
+    byDir.set(dir, (byDir.get(dir) ?? 0) + 1);
+  }
+  const dirs = [...byDir.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  return (
+    <div style={{ padding: "0 16px 12px 62px" }}>
+      {dirs.map(([dir, n]) => (
+        <div key={dir} style={{ display: "flex", alignItems: "center", gap: 8, lineHeight: 1.9 }}>
+          <Icon name="folder" size={11} color="#7a6440" />
+          <span className="di-mono" style={{ flex: 1, minWidth: 0, fontSize: 11, color: "#a08a5e", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{dir}</span>
+          <span className="di-mono" style={{ flex: "0 0 auto", fontSize: 10.5, color: "#7a6440" }}>{n}</span>
+        </div>
+      ))}
+      <button className="di-btn" onClick={onShowAll}
+        style={{ marginTop: 5, border: 0, background: "transparent", color: "var(--di-warn)", fontFamily: "inherit", fontSize: 11, cursor: "pointer", padding: 0 }}>
+        See all {files.length} files
+      </button>
     </div>
   );
 }
@@ -818,7 +885,7 @@ function RopeGauge({ l, lit, size = 9 }: { l: Leash; lit: boolean; size?: number
   );
 }
 
-function LeashPill({ mode, readOnly, budgetUsd, maxTurns, costsAreReal, onMode, onReadOnly, onBudget, onMaxTurns }: {
+function LeashPill({ mode, readOnly, budgetUsd, maxTurns, costsAreReal, onMode, onReadOnly, onBudget, onMaxTurns, open, onOpen }: {
   mode: string;
   readOnly: boolean;
   budgetUsd: number | null;
@@ -828,15 +895,17 @@ function LeashPill({ mode, readOnly, budgetUsd, maxTurns, costsAreReal, onMode, 
   onReadOnly: (on: boolean) => void;
   onBudget: (usd: number | null) => void;
   onMaxTurns: (t: number | null) => void;
+  open: boolean;
+  onOpen: (v: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const setOpen = onOpen;
   const [budgetDraft, setBudgetDraft] = useState("");
   const [turnsDraft, setTurnsDraft] = useState("");
   const cur = leashOf(mode);
 
   return (
     <div style={{ position: "relative" }}>
-      <button className="di-btn" onClick={() => setOpen((v) => !v)} aria-expanded={open}
+      <button className="di-btn" onClick={() => setOpen(!open)} aria-expanded={open}
         aria-label={readOnly ? "Review-only" : `Leash: ${cur.label}`}
         style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 28, padding: "0 11px",
           border: `1px solid ${readOnly ? "#2a6b5e" : "#3a2a20"}`, borderRadius: 999,
@@ -1029,6 +1098,50 @@ function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boolean) =
         background: on ? "var(--di-info)" : "#24384f", display: "flex", justifyContent: on ? "flex-end" : "flex-start", alignItems: "center" }}>
       <span style={{ width: 18, height: 18, borderRadius: 999, background: on ? "#062420" : "#8fa6b5", display: "block" }} />
     </button>
+  );
+}
+
+/**
+ * "Something needs you" (45c).
+ *
+ * A box with a 3px tone bar on the left edge, a mono uppercase kind label, the
+ * reason, and a link NAMING what you would change. Not a bubble — this is
+ * neither the human nor the agent talking.
+ */
+function SystemNeedsYou({ kind, tone, bg, border, subject, detail, action }: {
+  kind: string; tone: string; bg: string; border: string;
+  subject: string; detail: string | null;
+  action: { label: string; onClick: () => void } | null;
+}) {
+  return (
+    <div style={{ width: "100%", display: "flex", alignItems: "stretch", border: `1px solid ${border}`, borderRadius: 9, background: bg, overflow: "hidden" }}>
+      <span style={{ flex: "0 0 3px", background: tone }} />
+      <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 10, padding: "9px 12px" }}>
+        <span className="di-mono" style={{ flex: "0 0 auto", fontSize: 9.5, fontWeight: 600, letterSpacing: ".1em", textTransform: "uppercase", color: tone }}>{kind}</span>
+        <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--di-ink-soft)", lineHeight: 1.5 }}>
+          {subject}
+          {detail && <span className="di-mono" style={{ fontSize: 10.5, color: "#6f8296" }}> · {detail}</span>}
+        </span>
+        {action && (
+          <button className="di-btn" onClick={action.onClick}
+            style={{ flex: "0 0 auto", border: 0, background: "transparent", color: tone, fontFamily: "inherit", fontSize: 11.5, fontWeight: 600, textDecoration: "underline", cursor: "pointer", padding: 0 }}>
+            {action.label}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** "Something happened" (45c) — a rule through the column with centred mono
+ *  text. No box, no action: there is nothing to do about it. */
+function SystemHappened({ text, tone, ink }: { text: string; tone: string; ink: string }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "2px 0" }}>
+      <span style={{ flex: 1, height: 1, background: tone }} />
+      <span className="di-mono" style={{ flex: "0 0 auto", fontSize: 10, color: ink }}>{text}</span>
+      <span style={{ flex: 1, height: 1, background: tone }} />
+    </div>
   );
 }
 
